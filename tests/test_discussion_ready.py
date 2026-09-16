@@ -89,3 +89,30 @@ def test_agent_reply_clears_pending_feedback(store):
     assert store.ready_tasks("test")
     store.add_comment(task.id, "new plan", actor="claude")
     assert store.ready_tasks("test") == []
+
+
+def test_agent_cannot_move_planning_to_in_progress(store):
+    task = store.create_task("Hello", project_id="test", status="plan_requested")
+    store.pull_task(task.id)
+    store.add_comment(task.id, "plan: print hello", actor="claude")
+    with pytest.raises(RuntimeError, match="leave the card in Planning"):
+        store.move_task(task.id, "in_progress", actor="claude")
+    with pytest.raises(RuntimeError, match="leave the card in Planning"):
+        store.move_task(task.id, "plan_review", actor="agent:t-002")
+    held = store.get_task(task.id)
+    assert held is not None
+    assert held.status == "planning"
+
+
+def test_human_can_approve_plan(store):
+    task = store.create_task("Hello", project_id="test", status="planning")
+    moved = store.move_task(task.id, "plan_review", actor="user")
+    assert moved.status == "plan_review"
+
+
+def test_second_pull_after_plan_stays_in_planning(store):
+    task = store.create_task("Hello", project_id="test", status="plan_requested")
+    store.pull_task(task.id)
+    store.add_comment(task.id, "plan", actor="claude")
+    again = store.pull_task(task.id)
+    assert again.status == "planning"

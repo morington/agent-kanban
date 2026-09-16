@@ -99,7 +99,9 @@ When I say “check the board”, kanban_ready for this project.
 If a card is in that list, take it: blockers_released / blocked_by[].released means the parent is in Testing or later — do not wait for Done.
 Integrate cards (next=integrate, parallel=false): do them yourself, one by one, kanban_integrate. They share main.
 Cards with parallel=true (plan or implement): do NOT do them in this chat. Launch Cursor Task subagents in ONE turn, one Task per card, subagent_type generalPurpose, model inherit, environment local (not cloud). Each prompt must include project_id, task id, title, next, after, feedback.
-Each subagent: kanban_pull that id (assignee=agent:<task_id>), then only that card. plan → kanban_comment, leave in Planning. implement → kanban_prepare_workspace, work only in worktree_path, kanban_commit, kanban_comment, Testing. Then stop.
+Each subagent: kanban_pull that id (assignee=agent:<task_id>), then only that card.
+If next=plan: kanban_comment the plan (≤12 lines), STOP. No prepare_workspace, no files, no kanban_move.
+If next=implement: kanban_prepare_workspace, work only in worktree_path, kanban_commit, kanban_comment, Testing. Then stop.
 Wait for subagents. Do not kanban_columns. Do not kanban_move to Done yourself.
 ```
 

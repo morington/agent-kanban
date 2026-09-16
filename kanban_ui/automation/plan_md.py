@@ -166,7 +166,7 @@ CLAUDE_MD_TEMPLATE = """\
 
 http://localhost:7777/p/{project_id}
 
-On “check the board”: `kanban_ready`. `next=integrate` — parent does them serially. `parallel=true` — launch Cursor Task subagents in one turn (one Task per card, local, not cloud). Each subagent `kanban_pull`s only its id; implement only in `worktree_path`.
+On “check the board”: `kanban_ready`. Integrate — parent, serially. `parallel=true` — Task subagents in one turn (local). If `next=plan`, comment the plan and **stop** (no worktree, no code). If `next=implement`, work only in `worktree_path`.
 
 New tasks: [PLAN.md]({plan_path}) under `## Backlog`.
 {marker_end}

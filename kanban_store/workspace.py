@@ -228,7 +228,8 @@ def prepare_task_workspace(store: Store, task_id: str, *, actor: str) -> dict[st
         raise KeyError(task_id)
     if task.status not in _PREPARE_STATUSES:
         raise WorkspaceError(
-            "workspace can be prepared only from plan approved, in progress, or testing"
+            "no workspace until Plan approved / In progress / Testing "
+            "(after a plan, leave the card in Planning)"
         )
     project = store.get_project(task.project_id)
     if project is None or not project.path:

@@ -47,6 +47,15 @@ READY_STATUSES: frozenset[str] = frozenset(
 )
 _BLOCKER_OPEN_SQL = "NOT IN ('testing', 'acceptance', 'done')"
 _AGENT_ACTORS = frozenset({"claude", "automation", "cursor"})
+_HUMAN_ACTORS = frozenset({"user"})
+# After a plan the agent must wait; only a human moves the card forward.
+_PLANNING_HOLD_STATUSES = frozenset(
+    {"plan_review", "in_progress", "testing", "acceptance", "done"}
+)
+
+
+def is_human_actor(actor: str) -> bool:
+    return (actor or "").strip().lower() in _HUMAN_ACTORS
 
 
 def is_agent_actor(actor: str) -> bool:
@@ -637,6 +646,21 @@ class Store:
                     raise KeyError(task_id)
                 from_status = row["status"]
                 project_id = row["project_id"]
+                if from_status == "planning" and to_status in _PLANNING_HOLD_STATUSES:
+                    if not is_human_actor(actor):
+                        raise RuntimeError(
+                            "leave the card in Planning after the plan; "
+                            "a human moves it to Plan approved before any code"
+                        )
+                if (
+                    from_status == "plan_requested"
+                    and to_status in _PLANNING_HOLD_STATUSES
+                    and not is_human_actor(actor)
+                ):
+                    raise RuntimeError(
+                        "do not skip Planning with kanban_move; "
+                        "write the plan and leave the card, or pull with skip_planning"
+                    )
                 # column_order — append to the end of the project's column when not specified
                 if column_order is None:
                     r2 = self._conn.execute(
@@ -741,10 +765,7 @@ class Store:
                         target_status = "in_progress"
                         comment = "pulled approved plan"
                 elif from_status == "planning":
-                    implement = pending_skip is True or (
-                        pending_skip is None and bool(row["skip_planning"])
-                    )
-                    if implement:
+                    if pending_skip is True:
                         target_status = "in_progress"
                         comment = "pulled discussion to implement"
                     else:

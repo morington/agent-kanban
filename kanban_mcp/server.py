@@ -315,12 +315,10 @@ def kanban_pull(task_id: str, assignee: str = "claude") -> dict[str, Any]:
 
 @mcp.tool()
 def kanban_prepare_workspace(task_id: str, actor: str = "claude") -> dict[str, Any]:
-    """Create a git worktree under ``<project>/.kanban-worktrees``.
+    """Create a git worktree. Only from Plan approved, In progress, or Testing.
 
-    Independent tasks branch from main. A card blocked by another task
-    branches from that parent's task branch. Work only in ``worktree_path``;
-    the project checkout on main is left alone so another agent can run
-    in parallel on a different card.
+    Never call this when ``next=plan`` or the card is in Planning. After a
+    plan the human moves the card to Plan approved.
     """
     try:
         result = prepare_task_workspace(_get_store(), task_id, actor=actor)
@@ -360,13 +358,8 @@ def kanban_move(
     comment: str | None = None,
     actor: str = "claude",
 ) -> dict[str, Any]:
-    """Move a task to a new status.
-
-    Args:
-        task_id: T-XXX
-        to_status: target status (see kanban_columns).
-        comment: optional comment, recorded in history.
-        actor: claude / agent:<name>; defaults to claude.
+    """Move a task. Agents must not leave Planning for In progress / Plan approved /
+    Testing — that is a human action after they accept the plan.
     """
     if to_status not in STATUSES:
         return _err(f"unknown status: {to_status}; valid: {STATUSES}")
