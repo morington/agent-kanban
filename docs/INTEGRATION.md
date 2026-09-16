@@ -43,7 +43,8 @@ Restart Claude Code (or run `claude mcp list` to confirm `✓ Connected`). Tools
 
 | Tool | Purpose |
 |---|---|
-| `kanban_ready` | Cards to handle now (`next`: plan / implement / integrate) |
+| `kanban_ready` | Queue (`next`, `after`, `parallel`). Parent + Task subagents |
+| `kanban_claim` | One free card when you have no id |
 | `kanban_get` | Full card with history + links + blockers |
 | `kanban_pull` | Claim a ready card |
 | `kanban_prepare_workspace` | Create/switch the task branch in the project directory |
@@ -57,7 +58,7 @@ Independent cards branch from `main`. If B lists A as a blocker, B branches from
 
 **Example prompt for the agent:**
 
-> When I say “check the board”, call `kanban_ready` for this project. Handle cards in list order (Integrate, Testing, Plan approved, Planning). Read `feedback` if present. Always follow `after`. `plan`: pull, `kanban_comment` the plan or reply, leave in Planning. `implement`: pull, `kanban_prepare_workspace`, do the card, `kanban_commit`, `kanban_comment` what you did, move to Testing. `integrate`: `kanban_integrate` (merge and Done). Repeat until empty.
+> When I say “check the board”, `kanban_ready`. Integrate yourself (serial). For `parallel=true` cards launch Cursor Task subagents in one turn; each `kanban_pull`s its id and works in `worktree_path`.
 
 ---
 

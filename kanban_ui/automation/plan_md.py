@@ -166,11 +166,7 @@ CLAUDE_MD_TEMPLATE = """\
 
 http://localhost:7777/p/{project_id}
 
-On “check the board”: `kanban_ready`. Handle cards **in list order** (Integrate, Testing, Plan approved, Planning). Use `next` and always follow `after`:
-- `plan` — pull, `kanban_comment` a short plan or reply to feedback, leave in Planning. No code.
-- `implement` — pull, `kanban_prepare_workspace`, work **only in `worktree_path`**, `kanban_commit`, **`kanban_comment` what you did**, move to testing. Independent cards can run in parallel (separate worktrees).
-- `integrate` — `kanban_integrate` (merge into main and move to Done). Independent tasks branch from main; a child blocked by another card branches from that parent.
-Call `kanban_ready` again. Stop when empty. Blockers lift at Testing. Do not `kanban_move` to Done yourself.
+On “check the board”: `kanban_ready`. `next=integrate` — parent does them serially. `parallel=true` — launch Cursor Task subagents in one turn (one Task per card, local, not cloud). Each subagent `kanban_pull`s only its id; implement only in `worktree_path`.
 
 New tasks: [PLAN.md]({plan_path}) under `## Backlog`.
 {marker_end}

@@ -19,10 +19,11 @@ The same setup works for Cline (Settings → MCP Servers → Add).
 Tools (actor = "claude" by default, overridable via parameter):
 
 * ``kanban_list``    — list tasks (filter by status / assignee)
-* ``kanban_ready``   — list tasks that may be claimed now (blockers resolved)
+* ``kanban_ready``   — list tasks that may be claimed now
+* ``kanban_claim``   — take exactly one highest-priority card (for parallel agents)
 * ``kanban_get``     — full card with history
-* ``kanban_pull``    — atomically claim a ready task (→ planning, or → in progress for direct tasks)
-* ``kanban_prepare_workspace`` — create/switch the task git branch
+* ``kanban_pull``    — claim a specific ready task
+* ``kanban_prepare_workspace`` — git worktree under the project
 * ``kanban_commit``  — commit on the task branch
 * ``kanban_integrate`` — merge the task branch into main (from Integrate)
 * ``kanban_move``    — move a task to a new status
@@ -88,7 +89,7 @@ def kanban_columns() -> dict[str, Any]:
     return _ok({"columns": status_meta(), "statuses": STATUSES})
 
 
-def _short_task(t: Any, *, ready: bool = False) -> dict[str, Any]:
+def _short_task(t: Any, *, ready: bool = False, store: Any = None) -> dict[str, Any]:
     data = {
         "id": t.id,
         "title": t.title,
@@ -103,8 +104,14 @@ def _short_task(t: Any, *, ready: bool = False) -> dict[str, Any]:
         "project_id": t.project_id,
     }
     if ready:
-        data["next"] = ready_next(t)
+        nxt = ready_next(t)
+        data["next"] = nxt
         data["after"] = ready_after(t)
+        data["parallel"] = nxt in {"plan", "implement"}
+        if store is not None:
+            blocked_by = store.blocker_release_state(t)
+            data["blocked_by"] = blocked_by
+            data["blockers_released"] = all(item["released"] for item in blocked_by)
         pending = latest_pending_feedback(t.history)
         if pending and pending.comment:
             data["feedback"] = pending.comment
@@ -141,22 +148,49 @@ def kanban_list(
 
 
 @mcp.tool()
-def kanban_ready(project_id: str) -> dict[str, Any]:
-    """List every task that can be claimed now for one project.
+def kanban_ready(project_id: str, assignee: str | None = None) -> dict[str, Any]:
+    """List tasks that can be claimed now.
 
-    Handle cards in the returned order: Integrate, Testing, Plan approved,
-    Planning. `next` is plan, implement, or integrate. Always follow `after`
-    (a `kanban_comment` reply on the card, except integrate which records
-    the merge and moves to Done).
+    Parent agent: do ``next=integrate`` yourself, one by one (they share
+    ``main``). For each card with ``parallel=true``, launch a Cursor
+    **Task subagent** in the **same turn** (one Task call per card). Do
+    not implement those cards in the parent. Each subagent ``kanban_pull``s
+    its ``id`` only. If a card is in this list, parent blockers are already
+    released (Testing is enough — do not wait for Done).
     """
     try:
         project = _get_store().get_project(project_id)
         if project is None:
             return _err(f"project {project_id} not found")
-        tasks = _get_store().ready_tasks(project_id)
+        tasks = _get_store().ready_tasks(project_id, assignee=assignee)
     except Exception as e:
         return _err(str(e))
-    return _ok({"tasks": [_short_task(t, ready=True) for t in tasks], "count": len(tasks)})
+    store = _get_store()
+    return _ok({"tasks": [_short_task(t, ready=True, store=store) for t in tasks], "count": len(tasks)})
+
+
+@mcp.tool()
+def kanban_claim(project_id: str, assignee: str = "claude") -> dict[str, Any]:
+    """Claim the highest-priority free card. Prefer ``kanban_pull`` when
+    the parent already assigned you a task id. Integrate cards should be
+    claimed by the parent, not by parallel subagents.
+    """
+    try:
+        project = _get_store().get_project(project_id)
+        if project is None:
+            return _err(f"project {project_id} not found")
+        task = _get_store().claim_next(project_id, assignee=assignee)
+    except Exception as e:
+        return _err(str(e))
+    if task is None:
+        return _ok({"task": None, "count": 0})
+    data = task.to_public()
+    data["next"] = ready_next(task)
+    data["after"] = ready_after(task)
+    pending = latest_pending_feedback(task.history)
+    if pending and pending.comment:
+        data["feedback"] = pending.comment
+    return _ok({"task": data, "count": 1})
 
 
 @mcp.tool()

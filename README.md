@@ -58,6 +58,10 @@ A child card becomes ready when its parent reaches **Testing** (you do not wait 
 
 A card can be marked **Start without plan** so Plan requested goes straight to implementation.
 
+**Parallel (Cursor Task)**
+
+One chat is enough. The parent calls `kanban_ready`, does Integrate itself (shared `main`), and for every `parallel=true` card starts a Task subagent in the same turn. Each subagent `kanban_pull`s only its id and writes in its worktree. Do not use Cursor **cloud** subagents for this — they make their own branch and bypass the board worktrees.
+
 ## Install
 
 **Docker Compose (recommended if this is how you already run it):**
@@ -91,15 +95,12 @@ Walkthrough: [QUICKSTART.md](QUICKSTART.md). Agent wiring: [docs/INTEGRATION.md]
 4. Put this in the project’s **Agent rules**:
 
 ```text
-When I say “check the board”, call kanban_ready for this project.
-Handle cards in the returned order (Integrate, then Testing, then Plan approved, then Planning).
-Read `feedback` if present (latest human comment). Always follow `after`.
-Use `next`:
-- plan: pull, kanban_comment a short plan or reply, leave in Planning. No code.
-- implement: pull, kanban_prepare_workspace, work only in worktree_path, kanban_commit, kanban_comment what you did, move to Testing.
-- integrate: kanban_integrate (merge into main and move to Done).
-Call kanban_ready again. Stop when empty.
-Do not call kanban_columns. Do not kanban_move to Done yourself. Keep comments short and technical.
+When I say “check the board”, kanban_ready for this project.
+If a card is in that list, take it: blockers_released / blocked_by[].released means the parent is in Testing or later — do not wait for Done.
+Integrate cards (next=integrate, parallel=false): do them yourself, one by one, kanban_integrate. They share main.
+Cards with parallel=true (plan or implement): do NOT do them in this chat. Launch Cursor Task subagents in ONE turn, one Task per card, subagent_type generalPurpose, model inherit, environment local (not cloud). Each prompt must include project_id, task id, title, next, after, feedback.
+Each subagent: kanban_pull that id (assignee=agent:<task_id>), then only that card. plan → kanban_comment, leave in Planning. implement → kanban_prepare_workspace, work only in worktree_path, kanban_commit, kanban_comment, Testing. Then stop.
+Wait for subagents. Do not kanban_columns. Do not kanban_move to Done yourself.
 ```
 
 5. Say “check the board”. Reload the MCP server after kanban code changes.
@@ -108,9 +109,10 @@ Do not call kanban_columns. Do not kanban_move to Done yourself. Keep comments s
 
 | Tool | Purpose |
 |---|---|
-| `kanban_ready` | Queue in order (Integrate → Testing → Plan approved → Planning), with `next`, `after`, optional `feedback` |
+| `kanban_ready` | Queue (`next`, `after`, `parallel`, `feedback`). Parent fans out Task subagents when `parallel` |
 | `kanban_get` | Full card + history |
-| `kanban_pull` | Claim a ready card |
+| `kanban_claim` | Take one free card if you have no id yet |
+| `kanban_pull` | Claim a specific card (what a subagent should use) |
 | `kanban_prepare_workspace` | Worktree under `<project>/.kanban-worktrees/` |
 | `kanban_commit` | Commit in that worktree |
 | `kanban_integrate` | Merge into `main` from Integrate, then Done |

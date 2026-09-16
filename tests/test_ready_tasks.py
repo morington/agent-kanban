@@ -52,6 +52,18 @@ def test_child_ready_when_parent_reaches_testing(store):
     store.move_task(parent.id, "testing")
     ready = store.ready_tasks("test")
     assert [t.id for t in ready] == [child.id]
+    pulled = store.pull_task(child.id)
+    assert pulled.status == "planning"
+
+
+def test_blocker_release_state_at_testing(store):
+    parent = store.create_task("Parent", project_id="test", status="testing")
+    child = store.create_task("Child", project_id="test", status="plan_requested")
+    store.set_blockers(child.id, [parent.id])
+    stored = store.get_task(child.id)
+    assert stored is not None
+    state = store.blocker_release_state(stored)
+    assert state == [{"id": parent.id, "status": "testing", "released": True}]
 
 
 def test_child_not_ready_while_parent_in_progress(store):
@@ -100,3 +112,23 @@ def test_ready_after_implement_requires_comment(store):
     store.add_comment(task.id, "add alembic", actor="user", skip_planning=True)
     ready = store.ready_tasks("test")
     assert "kanban_comment" in ready_after(ready[0])
+
+
+def test_claim_next_gives_each_worker_a_different_card(store):
+    planned = store.create_task("Plan me", project_id="test", status="plan_requested")
+    direct = store.create_task(
+        "Direct", project_id="test", status="plan_requested", skip_planning=True
+    )
+    first = store.claim_next("test", assignee="cursor-a")
+    second = store.claim_next("test", assignee="cursor-b")
+    assert first is not None and second is not None
+    assert {first.id, second.id} == {planned.id, direct.id}
+    assert store.claim_next("test", assignee="cursor-c") is None
+
+
+def test_ready_hides_cards_assigned_to_another_agent(store):
+    task = store.create_task("Fix", project_id="test", status="testing")
+    store.assign_task(task.id, "cursor-a", actor="user")
+    store.add_comment(task.id, "add alembic", actor="user", skip_planning=True)
+    assert [t.id for t in store.ready_tasks("test", assignee="cursor-a")] == [task.id]
+    assert store.ready_tasks("test", assignee="cursor-b") == []

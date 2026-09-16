@@ -444,12 +444,13 @@ class Store:
             rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_task(r, eager_links=True) for r in rows]
 
-    def ready_tasks(self, project_id: str) -> list[Task]:
+    def ready_tasks(self, project_id: str, *, assignee: str | None = None) -> list[Task]:
         """Tasks an agent may safely claim right now.
 
         Includes Plan requested, Plan approved, Integrate, and unanswered
         human comments on Planning / In progress / Testing. Blockers release
-        once the parent reaches testing.
+        once the parent reaches testing. Cards assigned to another agent
+        are hidden when ``assignee`` is set.
         """
         with self._lock:
             rows = self._conn.execute(
@@ -468,10 +469,29 @@ class Store:
                 for r in rows
             ]
             return sort_ready_tasks(
-                [t for t in tasks if self._task_is_ready(t)]
+                [t for t in tasks if self._task_is_ready(t, assignee=assignee)]
             )
 
-    def _task_is_ready(self, task: Task) -> bool:
+    def claim_next(self, project_id: str, assignee: str = "claude") -> Task | None:
+        """Atomically claim the highest-priority ready card for this worker."""
+        tried: set[str] = set()
+        while True:
+            ready = [
+                t for t in self.ready_tasks(project_id, assignee=assignee)
+                if t.id not in tried
+            ]
+            if not ready:
+                return None
+            task = ready[0]
+            tried.add(task.id)
+            try:
+                return self.pull_task(task.id, assignee=assignee)
+            except RuntimeError:
+                continue
+
+    def _task_is_ready(self, task: Task, *, assignee: str | None = None) -> bool:
+        if assignee and task.assignee and task.assignee != assignee:
+            return False
         if any(
             self._blocker_status(bid) not in BLOCKER_RELEASED_STATUSES
             for bid in task.blockers
@@ -484,6 +504,20 @@ class Store:
     def _blocker_status(self, task_id: str) -> str | None:
         row = self._conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
         return None if row is None else row["status"]
+
+    def blocker_release_state(self, task: Task) -> list[dict[str, Any]]:
+        """Parent cards: released once the parent is in Testing (not only Done)."""
+        out: list[dict[str, Any]] = []
+        for bid in task.blockers:
+            status = self._blocker_status(bid)
+            out.append(
+                {
+                    "id": bid,
+                    "status": status,
+                    "released": status in BLOCKER_RELEASED_STATUSES,
+                }
+            )
+        return out
 
     def get_task(self, task_id: str) -> Task | None:
         with self._lock:
@@ -679,7 +713,12 @@ class Store:
                 ).fetchone()
                 if not row:
                     raise KeyError(task_id)
-                if row["assignee"] is not None and row["assignee"] != assignee:
+                from_status = row["status"]
+                if (
+                    row["assignee"] is not None
+                    and row["assignee"] != assignee
+                    and from_status not in {"plan_requested", "plan_review", "acceptance"}
+                ):
                     raise RuntimeError(
                         f"task {task_id} already assigned to {row['assignee']}"
                     )
@@ -690,7 +729,6 @@ class Store:
                 ).fetchall()
                 if blockers:
                     raise RuntimeError("unfinished blockers: " + ", ".join(r["id"] for r in blockers))
-                from_status = row["status"]
                 pending_skip = self._pending_skip_locked(task_id)
                 if from_status == "plan_requested":
                     target_status = "in_progress" if row["skip_planning"] else "planning"
