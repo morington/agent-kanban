@@ -8,24 +8,30 @@ CREATE TABLE IF NOT EXISTS projects (
     icon        TEXT NOT NULL DEFAULT '',            -- 1-2 chars: 'F', 'KB', 'AI'
     sort_order  INTEGER NOT NULL DEFAULT 0,          -- order in the project switcher
     archived    INTEGER NOT NULL DEFAULT 0,          -- 0/1
-    path        TEXT,                                -- Claude Code project directory (optional)
+    path        TEXT,                                -- project directory (optional)
+    branch_template TEXT NOT NULL DEFAULT 'kanban/{task_id}-{slug}',
+    agent_rules TEXT NOT NULL DEFAULT '',             -- project-specific agent instructions
     created_at  TEXT NOT NULL                        -- ISO8601
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
     id              TEXT PRIMARY KEY,                -- T-001, T-002, ...
     title           TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'backlog', -- backlog/approved/analyst/in_progress/testing/uat/done/blocked/cancelled
+    status          TEXT NOT NULL DEFAULT 'draft', -- draft/backlog/plan_requested/planning/plan_review/in_progress/testing/acceptance/done/blocked/cancelled
     priority        TEXT NOT NULL DEFAULT 'normal',  -- high/normal/low
     size            TEXT NOT NULL DEFAULT 'M',       -- S/M/L
     assignee        TEXT,                            -- user / agent:<name> / NULL
     description     TEXT NOT NULL DEFAULT '',
     acceptance      TEXT NOT NULL DEFAULT '',
+    skip_planning   INTEGER NOT NULL DEFAULT 0,      -- 1: agent may start implementation without plan review
     external_blocker TEXT,                           -- "DevOps: roles monitoring.viewer"
     created_at      TEXT NOT NULL,                   -- ISO8601
     moved_at        TEXT NOT NULL,                   -- ISO8601, last status change
     column_order    INTEGER NOT NULL DEFAULT 0,      -- order within the column (for drag-drop)
-    project_id      TEXT NOT NULL DEFAULT 'default'  -- FK -> projects.id
+    project_id      TEXT NOT NULL DEFAULT 'default', -- FK -> projects.id
+    branch          TEXT,
+    worktree_path   TEXT,
+    base_commit     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, column_order);
@@ -47,7 +53,8 @@ CREATE TABLE IF NOT EXISTS task_history (
     action       TEXT NOT NULL,                      -- create/move/comment/assign
     from_status  TEXT,
     to_status    TEXT,
-    comment      TEXT
+    comment       TEXT,
+    skip_planning INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_history_task ON task_history(task_id, ts);

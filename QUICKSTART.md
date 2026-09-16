@@ -41,7 +41,7 @@ python3.12 -m venv .venv
 
 </details>
 
-A `default` project shows up in the sidebar with an empty board and 9 columns.
+A `default` project shows up in the sidebar with an empty board (Draft through Done, plus Blocked and Cancelled).
 Hit `+ Task` (or press `n`) and create your first card.
 
 ### macOS auto-start (optional)
@@ -57,14 +57,13 @@ Logs: `~/Library/Logs/agent-kanban/{stdout,stderr}.log`.
 
 ## Part 2 — AI agent picks up tasks itself (3 minutes)
 
-The flow: you drag a card from "Backlog" to "Approved", and **Claude Code**
-(or any other agent) automatically:
-1. Claims the task (`approved → analyst`),
-2. Posts a plan as a comment,
-3. Moves it to `in_progress` and implements,
-4. Moves it to `testing` with a comment "ready for review".
+The flow: you drag a card to **Plan requested** (or **Plan approved** if the plan is already written), and the agent:
+1. Calls `kanban_ready` / `kanban_pull`,
+2. Writes a short plan and leaves the card in Planning (you move it to Plan approved),
+3. Implements on a **task git branch**, `kanban_commit`, moves to Testing,
+4. After you drag to **Integrate**, merges that branch into `main` (`kanban_integrate`).
 
-All you have to do is review the result and click "Accept".
+Independent cards branch from the project `main`. A child that lists a parent as a blocker branches from the parent's task branch.
 
 ### Step 1 — create a kanban project and bind it to your code directory
 

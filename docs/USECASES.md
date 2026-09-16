@@ -7,19 +7,11 @@ today — no "future features".
 ## Task lifecycle
 
 ```
-                user                                       agent (Claude/Cline/...)
-                 ↓                                                ↓
-   ┌────────┐  push  ┌──────────┐  pull  ┌──────────┐  ────→  ┌────────────┐
-   │ Backlog│ ─────→ │ Approved │ ─────  │ Analyst  │         │ In progress│
-   └────────┘        └──────────┘        └──────────┘         └────────────┘
-                                                                    │
-                                                                    ↓
-   ┌────────┐  ←──── ┌──────────┐  ←──── ┌────────────┐
-   │  Done  │ accept │   UAT    │  done  │  Testing   │
-   └────────┘        └──────────┘        └────────────┘
+Backlog → Plan requested → Planning → Plan approved → In progress → Testing → Done
 
-   Blocked — a parallel column for anything that's stuck.
-   Cancelled — terminal state for "we're not doing this".
+The agent writes a plan and leaves the card in Planning. You move it to Plan
+approved. The agent then implements. Child cards become ready when a parent
+reaches Testing (not only Done). Blocked / Cancelled are side columns.
 ```
 
 Column "owners" (see `kanban_columns()`) are a **semantic hint**, not access
@@ -136,7 +128,7 @@ UI alternative: `/p/myproj` → HIGH filter → density compact → everything v
 4. `kanban_move("T-008", "in_progress", comment="started writing the parser")`.
 5. *(work)* → `kanban_link("T-008", "pr", "https://github.com/.../pull/42")`.
 6. `kanban_move("T-008", "testing", comment="code+tests ready")` — webhook fires into Slack.
-7. In the UI you see the card in Testing, you review → drag-drop into **UAT** → **Done**.
+7. In the UI you see the card in Testing, you review → drag-drop into **Done**.
 
 **Outcome:** the task ran the full workflow; history holds every step with the actor (`claude`), PR links, and comments.
 
@@ -255,8 +247,8 @@ The UI sidebar remembers the last-opened project (`localStorage.kb.lastProject`)
 1. UI/API → `move_task(T-027, to_status="approved")` → DB write.
 2. The endpoint emits a `task_moved` event → the rule engine matches and runs `launch-claude.sh T-027 myproj` in the background.
 3. The script fetches the task description over REST, builds a prompt, and starts `claude -p "..." --permission-mode=acceptEdits` in the project directory in the background (`nohup ... &`).
-4. Through MCP, Claude calls `kanban_pull(T-027)` (approved → analyst, assignee=claude), posts a plan via `kanban_comment`, moves to `in_progress`, implements, and finally `kanban_move(T-027, "testing", comment="ready for review")`.
-5. In the UI you see the card in Testing, you review → drag into **UAT** → **Done**.
+4. Through MCP, the agent calls `kanban_pull` (Plan requested → Planning, or Plan approved → In progress), comments briefly, and for implementation `kanban_move(..., "testing")`.
+5. In the UI you see the card in Testing, you review → drag into **Done**.
 
 **Triggers (rule.trigger.type=task_moved):**
 - `to_status` (required) — destination column.

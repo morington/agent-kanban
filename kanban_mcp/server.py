@@ -19,8 +19,12 @@ The same setup works for Cline (Settings → MCP Servers → Add).
 Tools (actor = "claude" by default, overridable via parameter):
 
 * ``kanban_list``    — list tasks (filter by status / assignee)
+* ``kanban_ready``   — list tasks that may be claimed now (blockers resolved)
 * ``kanban_get``     — full card with history
-* ``kanban_pull``    — atomically "claim a task" (approved → analyst, assignee=claude)
+* ``kanban_pull``    — atomically claim a ready task (→ planning, or → in progress for direct tasks)
+* ``kanban_prepare_workspace`` — create/switch the task git branch
+* ``kanban_commit``  — commit on the task branch
+* ``kanban_integrate`` — merge the task branch into main (from Integrate)
 * ``kanban_move``    — move a task to a new status
 * ``kanban_comment`` — comment in history
 * ``kanban_create``  — new card
@@ -31,15 +35,19 @@ On failure a human-readable message is returned; the MCP layer does not crash.
 """
 from __future__ import annotations
 
-import json
 import os
-import sys
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from kanban_store import Store, STATUSES, status_meta
+from kanban_store import Store, STATUSES, status_meta, ready_next, ready_after, latest_pending_feedback
 from kanban_store.store import DEFAULT_PROJECT_ID
+from kanban_store.workspace import (
+    WorkspaceError,
+    commit_task,
+    integrate_task,
+    prepare_task_workspace,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -73,15 +81,15 @@ mcp = FastMCP("agent-kanban")
 
 @mcp.tool()
 def kanban_columns() -> dict[str, Any]:
-    """Describe every kanban column and who moves cards in/out of it.
+    """Describe every kanban column and who typically moves cards in/out.
 
-    Call this at the start of a session to understand the current status model.
+    Do not call this on every board check — statuses are stable.
     """
     return _ok({"columns": status_meta(), "statuses": STATUSES})
 
 
-def _short_task(t: Any) -> dict[str, Any]:
-    return {
+def _short_task(t: Any, *, ready: bool = False) -> dict[str, Any]:
+    data = {
         "id": t.id,
         "title": t.title,
         "status": t.status,
@@ -89,10 +97,18 @@ def _short_task(t: Any) -> dict[str, Any]:
         "size": t.size,
         "assignee": t.assignee,
         "external_blocker": t.external_blocker,
+        "skip_planning": t.skip_planning,
         "moved_at": t.moved_at,
         "blockers": t.blockers,
         "project_id": t.project_id,
     }
+    if ready:
+        data["next"] = ready_next(t)
+        data["after"] = ready_after(t)
+        pending = latest_pending_feedback(t.history)
+        if pending and pending.comment:
+            data["feedback"] = pending.comment
+    return data
 
 
 @mcp.tool()
@@ -104,7 +120,7 @@ def kanban_list(
     """List tasks with optional filters.
 
     Args:
-        status: one of backlog/approved/analyst/in_progress/testing/uat/done/blocked/cancelled,
+        status: one of backlog/plan_requested/planning/plan_review/in_progress/testing/done/blocked/cancelled,
                 or None for all.
         assignee: claude / agent:<name> / user, or None for all.
         project_id: project slug (see kanban_projects); None = all projects.
@@ -125,18 +141,27 @@ def kanban_list(
 
 
 @mcp.tool()
-def kanban_projects() -> dict[str, Any]:
-    """List projects with task counts per column.
+def kanban_ready(project_id: str) -> dict[str, Any]:
+    """List every task that can be claimed now for one project.
 
-    Call this at the start of a session to learn which projects exist.
-
-    Returns:
-        {"ok": true, "data": {"projects": [
-            {"id": "finops", "name": "FinOps", "color": "#F10D30",
-             "path": "/abs/path", "task_counts": {"backlog": 5, ...},
-             "total_tasks": 33, "archived": false}
-        ]}}
+    Handle cards in the returned order: Integrate, Testing, Plan approved,
+    Planning. `next` is plan, implement, or integrate. Always follow `after`
+    (a `kanban_comment` reply on the card, except integrate which records
+    the merge and moves to Done).
     """
+    try:
+        project = _get_store().get_project(project_id)
+        if project is None:
+            return _err(f"project {project_id} not found")
+        tasks = _get_store().ready_tasks(project_id)
+    except Exception as e:
+        return _err(str(e))
+    return _ok({"tasks": [_short_task(t, ready=True) for t in tasks], "count": len(tasks)})
+
+
+@mcp.tool()
+def kanban_projects() -> dict[str, Any]:
+    """List projects with task counts per column."""
     try:
         projects = _get_store().list_projects(include_archived=False)
     except Exception as e:
@@ -206,7 +231,7 @@ def kanban_my_active(
     assignee: str = "claude",
     project_id: str | None = None,
 ) -> dict[str, Any]:
-    """Active tasks for the given assignee — in analyst/in_progress/testing.
+    """Active tasks for the given assignee — in planning/in_progress/testing.
 
     Perfect as the first query of a session: "what am I working on right now?"
 
@@ -218,7 +243,7 @@ def kanban_my_active(
         tasks = _get_store().list_tasks(assignee=assignee, project_id=project_id)
     except Exception as e:
         return _err(str(e))
-    active = [t for t in tasks if t.status in ("analyst", "in_progress", "testing")]
+    active = [t for t in tasks if t.status in ("planning", "in_progress", "testing")]
     return _ok({
         "tasks": [_short_task(t) for t in active],
         "count": len(active),
@@ -240,12 +265,10 @@ def kanban_get(task_id: str) -> dict[str, Any]:
 
 @mcp.tool()
 def kanban_pull(task_id: str, assignee: str = "claude") -> dict[str, Any]:
-    """Atomically "claim a task" from Approved → Analyst.
+    """Atomically claim a ready task.
 
-    Conditions: the task must be in status ``approved`` AND its assignee
-    must be either None or equal to ``assignee``. If another agent has
-    already taken it, you get an error — try a different task. project_id
-    is taken from the task itself, so you do not need to provide it.
+    Plan requested → Planning (or In progress if skip_planning).
+    Plan approved → In progress. Planning discussion → replan or In progress.
     """
     try:
         t = _get_store().pull_task(task_id, assignee=assignee)
@@ -254,6 +277,46 @@ def kanban_pull(task_id: str, assignee: str = "claude") -> dict[str, Any]:
     except Exception as e:
         return _err(str(e))
     return _ok(t.to_public())
+
+
+@mcp.tool()
+def kanban_prepare_workspace(task_id: str, actor: str = "claude") -> dict[str, Any]:
+    """Create a git worktree under ``<project>/.kanban-worktrees``.
+
+    Independent tasks branch from main. A card blocked by another task
+    branches from that parent's task branch. Work only in ``worktree_path``;
+    the project checkout on main is left alone so another agent can run
+    in parallel on a different card.
+    """
+    try:
+        result = prepare_task_workspace(_get_store(), task_id, actor=actor)
+    except KeyError:
+        return _err(f"task {task_id} not found")
+    except WorkspaceError as e:
+        return _err(str(e))
+    return _ok(result)
+
+
+@mcp.tool()
+def kanban_commit(task_id: str, message: str, actor: str = "claude") -> dict[str, Any]:
+    """Commit all current changes in the task worktree."""
+    try:
+        return _ok(commit_task(_get_store(), task_id, message, actor=actor))
+    except KeyError:
+        return _err(f"task {task_id} not found")
+    except WorkspaceError as e:
+        return _err(str(e))
+
+
+@mcp.tool()
+def kanban_integrate(task_id: str, actor: str = "claude") -> dict[str, Any]:
+    """Merge the task branch into the project default branch from Integrate."""
+    try:
+        return _ok(integrate_task(_get_store(), task_id, actor=actor))
+    except KeyError:
+        return _err(f"task {task_id} not found")
+    except WorkspaceError as e:
+        return _err(str(e))
 
 
 @mcp.tool()
@@ -290,8 +353,8 @@ def kanban_comment(
 ) -> dict[str, Any]:
     """Add a comment to the task's history.
 
-    Useful for recording the plan once the task lands in Analyst, or for
-    capturing a test result.
+    Required after plan or implement: a short reply so the card keeps a
+    record of what you did (especially after a human comment).
     """
     try:
         _get_store().add_comment(task_id, text, actor=actor)
@@ -310,11 +373,12 @@ def kanban_create(
     status: str = "backlog",
     priority: str = "normal",
     size: str = "M",
+    skip_planning: bool = False,
     external_blocker: str | None = None,
     actor: str = "claude",
     project_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create a new card. Defaults to Backlog; for immediate work pass status='in_progress'.
+    """Create a new card. Defaults to Backlog.
 
     Args:
         title: a short single-line title.
@@ -322,6 +386,7 @@ def kanban_create(
         acceptance: acceptance criteria (what counts as "done").
         priority: high / normal / low.
         size: S (<30 min) / M (<2 h) / L (>2 h).
+        skip_planning: after Plan requested, start implementation without waiting for plan approval.
         project_id: project slug; None = default (see KANBAN_DEFAULT_PROJECT_ID
                     or KANBAN_PROJECT_ID env).
     """
@@ -336,6 +401,7 @@ def kanban_create(
             status=status,
             priority=priority,
             size=size,
+            skip_planning=skip_planning,
             external_blocker=external_blocker,
             actor=actor,
             project_id=pid,
@@ -380,6 +446,7 @@ def kanban_update(
     acceptance: str | None = None,
     priority: str | None = None,
     size: str | None = None,
+    skip_planning: bool | None = None,
     external_blocker: str | None = None,
     actor: str = "claude",
 ) -> dict[str, Any]:
@@ -393,6 +460,7 @@ def kanban_update(
             acceptance=acceptance,
             priority=priority,
             size=size,
+            skip_planning=skip_planning,
             external_blocker=external_blocker,
         )
     except KeyError:

@@ -31,14 +31,119 @@ from typing import Any, Iterable
 # Status model
 # ============================================================================
 
-# 9 columns in left-to-right UI order.
+# Blockers stop blocking once the parent is in testing (not only done).
+BLOCKER_RELEASED_STATUSES: frozenset[str] = frozenset(
+    {"testing", "acceptance", "done"}
+)
+READY_STATUSES: frozenset[str] = frozenset(
+    {
+        "plan_requested",
+        "plan_review",
+        "planning",
+        "in_progress",
+        "testing",
+        "acceptance",
+    }
+)
+_BLOCKER_OPEN_SQL = "NOT IN ('testing', 'acceptance', 'done')"
+_AGENT_ACTORS = frozenset({"claude", "automation", "cursor"})
+
+
+def is_agent_actor(actor: str) -> bool:
+    name = (actor or "").strip().lower()
+    return name in _AGENT_ACTORS or name.startswith("agent:")
+
+
+def latest_pending_feedback(history: list[TaskHistory]) -> TaskHistory | None:
+    """Latest human comment that the agent has not answered yet."""
+    comments = [h for h in history if h.action == "comment"]
+    if not comments:
+        return None
+    last_agent_id = max((h.id for h in comments if is_agent_actor(h.actor)), default=0)
+    pending = [h for h in comments if not is_agent_actor(h.actor) and h.id > last_agent_id]
+    return pending[-1] if pending else None
+
+
+READY_STATUS_PRIORITY: dict[str, int] = {
+    "acceptance": 0,
+    "testing": 1,
+    "plan_review": 2,
+    "planning": 3,
+    "in_progress": 4,
+    "plan_requested": 5,
+}
+
+
+def sort_tasks_by_blockers(tasks: list[Task]) -> list[Task]:
+    """Parents before children so merges and dependent work run in order."""
+    by_id = {t.id: t for t in tasks}
+    ordered: list[Task] = []
+    seen: set[str] = set()
+
+    def visit(task: Task) -> None:
+        if task.id in seen:
+            return
+        seen.add(task.id)
+        for blocker_id in task.blockers:
+            parent = by_id.get(blocker_id)
+            if parent is not None:
+                visit(parent)
+        ordered.append(task)
+
+    for task in tasks:
+        visit(task)
+    return ordered
+
+
+def sort_ready_tasks(tasks: list[Task]) -> list[Task]:
+    """Integrate, then Testing, then Plan approved, then Planning."""
+    grouped: dict[str, list[Task]] = {}
+    for task in tasks:
+        grouped.setdefault(task.status, []).append(task)
+    ordered: list[Task] = []
+    for status in sorted(grouped, key=lambda s: READY_STATUS_PRIORITY.get(s, 99)):
+        ordered.extend(sort_tasks_by_blockers(grouped[status]))
+    return ordered
+
+
+def ready_next(task: Task) -> str:
+    """What an agent should do with a ready card: plan, implement, or integrate."""
+    pending = latest_pending_feedback(task.history)
+    if pending is not None:
+        return "implement" if pending.skip_planning else "plan"
+    if task.status == "acceptance":
+        return "integrate"
+    if task.status == "plan_review" or task.skip_planning:
+        return "implement"
+    return "plan"
+
+
+def ready_after(task: Task) -> str:
+    """What the agent must record on the card after the current step."""
+    nxt = ready_next(task)
+    if nxt == "plan":
+        return (
+            "kanban_comment a short reply on this card (the plan, or an answer "
+            "to feedback); leave in Planning"
+        )
+    if nxt == "implement":
+        return (
+            "kanban_comment a short reply of what you did (this is the card "
+            "history), then move to Testing"
+        )
+    return "kanban_integrate (merges into main and moves the card to Done)"
+
+
+# Columns in left-to-right UI order.
 STATUSES: list[str] = [
+    "draft",
     "backlog",
-    "approved",
-    "analyst",
+    "plan_requested",
+    "planning",
+    "plan_review",
     "in_progress",
     "testing",
-    "uat",
+    "acceptance",
     "done",
     "blocked",
     "cancelled",
@@ -48,12 +153,14 @@ STATUSES: list[str] = [
 def status_meta() -> list[dict[str, str]]:
     """Column metadata for the UI (label + cssClass)."""
     return [
+        {"id": "draft",       "title": "Draft",        "owner": "user"},
         {"id": "backlog",     "title": "Backlog",      "owner": "user"},
-        {"id": "approved",    "title": "Approved",     "owner": "agent"},
-        {"id": "analyst",     "title": "Analyst",      "owner": "agent"},
+        {"id": "plan_requested", "title": "Plan requested", "owner": "agent"},
+        {"id": "planning",    "title": "Planning",     "owner": "agent"},
+        {"id": "plan_review", "title": "Plan approved", "owner": "agent"},
         {"id": "in_progress", "title": "In progress",  "owner": "agent"},
         {"id": "testing",     "title": "Testing",      "owner": "agent"},
-        {"id": "uat",         "title": "UAT",          "owner": "user"},
+        {"id": "acceptance",  "title": "Integrate",    "owner": "agent"},
         {"id": "done",        "title": "Done",         "owner": "user"},
         {"id": "blocked",     "title": "Blocked",      "owner": "any"},
         {"id": "cancelled",   "title": "Cancelled",    "owner": "user"},
@@ -75,6 +182,7 @@ class TaskHistory:
     from_status: str | None
     to_status: str | None
     comment: str | None
+    skip_planning: bool = False
 
 
 @dataclass
@@ -87,11 +195,15 @@ class Task:
     assignee: str | None
     description: str
     acceptance: str
+    skip_planning: bool
     external_blocker: str | None
     created_at: str
     moved_at: str
     column_order: int
     project_id: str = DEFAULT_PROJECT_ID
+    branch: str | None = None
+    worktree_path: str | None = None
+    base_commit: str | None = None
     links: list[dict[str, str]] = field(default_factory=list)
     history: list[TaskHistory] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
@@ -112,6 +224,8 @@ class Project:
     archived: bool
     created_at: str
     path: str | None = None
+    branch_template: str = "kanban/{task_id}-{slug}"
+    agent_rules: str = ""
     task_counts: dict[str, int] = field(default_factory=dict)
     total_tasks: int = 0
 
@@ -135,7 +249,7 @@ class Store:
 
     def __init__(self, db_path: str | Path | None = None):
         if db_path is None:
-            db_path = Path(__file__).resolve().parent.parent / "tasks.db"
+            db_path = os.environ.get("KANBAN_DB") or (Path(__file__).resolve().parent.parent / "tasks.db")
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
@@ -159,6 +273,60 @@ class Store:
             self._migrate_v2()
             self._migrate_v3()
             self._migrate_v4()
+            self._migrate_v5()
+            self._migrate_v6()
+            self._migrate_v7()
+            self._migrate_v8()
+            self._migrate_v9()
+
+    def _schema_version(self) -> int:
+        row = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        return int(row["value"]) if row else 1
+
+    def _bump_schema(self, n: int) -> None:
+        if self._schema_version() < n:
+            self._conn.execute(
+                "UPDATE meta SET value=? WHERE key='schema_version'", (str(n),)
+            )
+
+    def _migrate_v9(self) -> None:
+        """Keep Integrate (status=acceptance). Never rewrite those cards."""
+        self._bump_schema(9)
+
+    def _migrate_v8(self) -> None:
+        """v8 briefly dropped Acceptance; that change was reverted."""
+        self._bump_schema(8)
+
+    def _migrate_v7(self) -> None:
+        """v6 → v7: per-comment opt-in to implement without a new plan."""
+        hist_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(task_history)").fetchall()}
+        if "skip_planning" not in hist_cols:
+            self._conn.execute(
+                "ALTER TABLE task_history ADD COLUMN skip_planning INTEGER NOT NULL DEFAULT 0"
+            )
+        self._bump_schema(7)
+
+    def _migrate_v6(self) -> None:
+        """v5 → v6: per-task opt-in to direct implementation."""
+        task_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        if "skip_planning" not in task_cols:
+            self._conn.execute("ALTER TABLE tasks ADD COLUMN skip_planning INTEGER NOT NULL DEFAULT 0")
+        self._bump_schema(6)
+
+    def _migrate_v5(self) -> None:
+        project_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(projects)").fetchall()}
+        task_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        if "branch_template" not in project_cols:
+            self._conn.execute("ALTER TABLE projects ADD COLUMN branch_template TEXT NOT NULL DEFAULT 'kanban/{task_id}-{slug}'")
+        if "agent_rules" not in project_cols:
+            self._conn.execute("ALTER TABLE projects ADD COLUMN agent_rules TEXT NOT NULL DEFAULT ''")
+        for name in ("branch", "worktree_path", "base_commit"):
+            if name not in task_cols:
+                self._conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT")
+        self._conn.execute("UPDATE tasks SET status='plan_requested' WHERE status='approved'")
+        self._conn.execute("UPDATE tasks SET status='planning' WHERE status='analyst'")
+        self._conn.execute("UPDATE tasks SET status='acceptance' WHERE status='uat'")
+        self._bump_schema(5)
 
     def _migrate_v4(self) -> None:
         """v3 → v4: project_sources table (created via schema.sql,
@@ -276,6 +444,47 @@ class Store:
             rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_task(r, eager_links=True) for r in rows]
 
+    def ready_tasks(self, project_id: str) -> list[Task]:
+        """Tasks an agent may safely claim right now.
+
+        Includes Plan requested, Plan approved, Integrate, and unanswered
+        human comments on Planning / In progress / Testing. Blockers release
+        once the parent reaches testing.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM tasks
+                WHERE project_id = ? AND status IN (
+                    'plan_requested', 'plan_review', 'planning', 'in_progress',
+                    'testing', 'acceptance'
+                )
+                ORDER BY status, column_order, id
+                """,
+                (project_id,),
+            ).fetchall()
+            tasks = [
+                self._row_to_task(r, eager_links=True, eager_history=True)
+                for r in rows
+            ]
+            return sort_ready_tasks(
+                [t for t in tasks if self._task_is_ready(t)]
+            )
+
+    def _task_is_ready(self, task: Task) -> bool:
+        if any(
+            self._blocker_status(bid) not in BLOCKER_RELEASED_STATUSES
+            for bid in task.blockers
+        ):
+            return False
+        if task.status in {"plan_requested", "plan_review", "acceptance"}:
+            return True
+        return latest_pending_feedback(task.history) is not None
+
+    def _blocker_status(self, task_id: str) -> str | None:
+        row = self._conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        return None if row is None else row["status"]
+
     def get_task(self, task_id: str) -> Task | None:
         with self._lock:
             row = self._conn.execute(
@@ -300,11 +509,12 @@ class Store:
         self,
         title: str,
         *,
-        status: str = "backlog",
+        status: str = "draft",
         priority: str = "normal",
         size: str = "M",
         description: str = "",
         acceptance: str = "",
+        skip_planning: bool = False,
         assignee: str | None = None,
         external_blocker: str | None = None,
         actor: str = "user",
@@ -329,9 +539,9 @@ class Store:
                 self._conn.execute(
                     """
                     INSERT INTO tasks (id, title, status, priority, size, assignee,
-                                        description, acceptance, external_blocker,
+                                        description, acceptance, skip_planning, external_blocker,
                                         created_at, moved_at, column_order, project_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         tid,
@@ -342,6 +552,7 @@ class Store:
                         assignee,
                         description,
                         acceptance,
+                        int(skip_planning),
                         external_blocker,
                         ts,
                         ts,
@@ -415,6 +626,13 @@ class Store:
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
+        if to_status in {"done", "cancelled"}:
+            from kanban_store.workspace import maybe_drop_worktree_for_status
+
+            try:
+                maybe_drop_worktree_for_status(self, task_id, to_status)
+            except Exception:
+                pass
         task = self.get_task(task_id)
         assert task is not None
         return task
@@ -447,16 +665,17 @@ class Store:
         return t
 
     def pull_task(self, task_id: str, assignee: str = "claude") -> Task:
-        """Atomic: assignee IS NULL → assignee, status approved → analyst.
+        """Atomic claim of a ready task.
 
-        Used by Claude/an agent for a safe "claim the task" operation.
+        ``plan_requested`` → planning, or in_progress when ``skip_planning``.
+        ``plan_review`` (plan approved) → in_progress.
         """
         ts = _now()
         with self._lock:
             self._conn.execute("BEGIN")
             try:
                 row = self._conn.execute(
-                    "SELECT assignee, status, project_id FROM tasks WHERE id=?", (task_id,)
+                    "SELECT assignee, status, project_id, skip_planning FROM tasks WHERE id=?", (task_id,)
                 ).fetchone()
                 if not row:
                     raise KeyError(task_id)
@@ -464,29 +683,81 @@ class Store:
                     raise RuntimeError(
                         f"task {task_id} already assigned to {row['assignee']}"
                     )
-                if row["status"] != "approved":
-                    raise RuntimeError(
-                        f"task {task_id} is in '{row['status']}', not 'approved'"
+                blockers = self._conn.execute(
+                    "SELECT t.id FROM task_blockers b JOIN tasks t ON t.id=b.blocker_id "
+                    f"WHERE b.task_id=? AND t.status {_BLOCKER_OPEN_SQL}",
+                    (task_id,),
+                ).fetchall()
+                if blockers:
+                    raise RuntimeError("unfinished blockers: " + ", ".join(r["id"] for r in blockers))
+                from_status = row["status"]
+                pending_skip = self._pending_skip_locked(task_id)
+                if from_status == "plan_requested":
+                    target_status = "in_progress" if row["skip_planning"] else "planning"
+                    comment = "pulled without planning" if row["skip_planning"] else "pulled"
+                elif from_status == "plan_review":
+                    if pending_skip is False:
+                        target_status = "planning"
+                        comment = "pulled discussion to replan"
+                    else:
+                        target_status = "in_progress"
+                        comment = "pulled approved plan"
+                elif from_status == "planning":
+                    implement = pending_skip is True or (
+                        pending_skip is None and bool(row["skip_planning"])
                     )
-                # move to analyst and claim (per project)
-                r2 = self._conn.execute(
-                    "SELECT COALESCE(MAX(column_order), -1) AS m FROM tasks "
-                    "WHERE status='analyst' AND project_id=?",
-                    (row["project_id"],),
-                ).fetchone()
-                col_order = (r2["m"] + 1) if r2 else 0
-                self._conn.execute(
-                    """UPDATE tasks SET status='analyst', assignee=?, moved_at=?, column_order=?
-                       WHERE id=?""",
-                    (assignee, ts, col_order, task_id),
-                )
-                self._conn.execute(
-                    """INSERT INTO task_history
-                       (task_id, ts, actor, action, from_status, to_status, comment)
-                       VALUES (?, ?, ?, 'move', 'approved', 'analyst', 'pulled')""",
-                    (task_id, ts, assignee),
-                )
-                self._conn.execute("COMMIT")
+                    if implement:
+                        target_status = "in_progress"
+                        comment = "pulled discussion to implement"
+                    else:
+                        target_status = "planning"
+                        comment = "pulled discussion to replan"
+                elif from_status == "in_progress":
+                    target_status = "in_progress"
+                    comment = "pulled discussion"
+                elif from_status == "testing":
+                    if pending_skip is True:
+                        target_status = "in_progress"
+                        comment = "pulled testing discussion to implement"
+                    else:
+                        target_status = "planning"
+                        comment = "pulled testing discussion to replan"
+                elif from_status == "acceptance":
+                    if pending_skip is False:
+                        target_status = "planning"
+                        comment = "pulled merge discussion to replan"
+                    else:
+                        target_status = "acceptance"
+                        comment = "pulled merge"
+                else:
+                    raise RuntimeError(
+                        f"task {task_id} is in '{from_status}', not a ready status"
+                    )
+                if from_status == target_status:
+                    self._conn.execute(
+                        "UPDATE tasks SET assignee=? WHERE id=?",
+                        (assignee, task_id),
+                    )
+                    self._conn.execute("COMMIT")
+                else:
+                    r2 = self._conn.execute(
+                        "SELECT COALESCE(MAX(column_order), -1) AS m FROM tasks "
+                            "WHERE status=? AND project_id=?",
+                        (target_status, row["project_id"]),
+                    ).fetchone()
+                    col_order = (r2["m"] + 1) if r2 else 0
+                    self._conn.execute(
+                        """UPDATE tasks SET status=?, assignee=?, moved_at=?, column_order=?
+                           WHERE id=?""",
+                        (target_status, assignee, ts, col_order, task_id),
+                    )
+                    self._conn.execute(
+                        """INSERT INTO task_history
+                           (task_id, ts, actor, action, from_status, to_status, comment)
+                           VALUES (?, ?, ?, 'move', ?, ?, ?)""",
+                        (task_id, ts, assignee, from_status, target_status, comment),
+                    )
+                    self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
@@ -494,7 +765,32 @@ class Store:
         assert t is not None
         return t
 
-    def add_comment(self, task_id: str, text: str, *, actor: str) -> None:
+    def _pending_skip_locked(self, task_id: str) -> bool | None:
+        rows = self._conn.execute(
+            """
+            SELECT id, actor, skip_planning FROM task_history
+            WHERE task_id=? AND action='comment' ORDER BY id
+            """,
+            (task_id,),
+        ).fetchall()
+        last_agent_id = 0
+        pending: bool | None = None
+        for row in rows:
+            if is_agent_actor(row["actor"]):
+                last_agent_id = row["id"]
+                pending = None
+            elif row["id"] > last_agent_id:
+                pending = bool(row["skip_planning"]) if "skip_planning" in row.keys() else False
+        return pending
+
+    def add_comment(
+        self,
+        task_id: str,
+        text: str,
+        *,
+        actor: str,
+        skip_planning: bool = False,
+    ) -> None:
         ts = _now()
         with self._lock:
             row = self._conn.execute(
@@ -504,10 +800,29 @@ class Store:
                 raise KeyError(task_id)
             self._conn.execute(
                 """INSERT INTO task_history
-                   (task_id, ts, actor, action, from_status, to_status, comment)
-                   VALUES (?, ?, ?, 'comment', NULL, NULL, ?)""",
-                (task_id, ts, actor, text),
+                   (task_id, ts, actor, action, from_status, to_status, comment, skip_planning)
+                   VALUES (?, ?, ?, 'comment', NULL, NULL, ?, ?)""",
+                (task_id, ts, actor, text, int(skip_planning)),
             )
+
+    def update_comment(self, task_id: str, history_id: int, text: str) -> None:
+        with self._lock:
+            cursor = self._conn.execute(
+                """UPDATE task_history SET comment=?
+                   WHERE id=? AND task_id=? AND action='comment'""",
+                (text, history_id, task_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(history_id)
+
+    def delete_comment(self, task_id: str, history_id: int) -> None:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM task_history WHERE id=? AND task_id=? AND action='comment'",
+                (history_id, task_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(history_id)
 
     def add_link(self, task_id: str, type_: str, value: str) -> None:
         with self._lock:
@@ -520,6 +835,17 @@ class Store:
         with self._lock:
             self._conn.execute("BEGIN")
             try:
+                task = self._conn.execute("SELECT project_id FROM tasks WHERE id=?", (task_id,)).fetchone()
+                if not task:
+                    raise KeyError(task_id)
+                if task_id in blocker_ids or len(set(blocker_ids)) != len(blocker_ids):
+                    raise ValueError("invalid blocker list")
+                for blocker_id in blocker_ids:
+                    row = self._conn.execute("SELECT project_id FROM tasks WHERE id=?", (blocker_id,)).fetchone()
+                    if not row:
+                        raise KeyError(f"blocker {blocker_id} not found")
+                    if row["project_id"] != task["project_id"]:
+                        raise ValueError("blockers must belong to the same project")
                 self._conn.execute(
                     "DELETE FROM task_blockers WHERE task_id=?", (task_id,)
                 )
@@ -543,6 +869,7 @@ class Store:
         size: str | None = None,
         description: str | None = None,
         acceptance: str | None = None,
+        skip_planning: bool | None = None,
         external_blocker: str | None = None,
     ) -> Task:
         ts = _now()
@@ -554,6 +881,7 @@ class Store:
             ("size", size),
             ("description", description),
             ("acceptance", acceptance),
+            ("skip_planning", None if skip_planning is None else int(skip_planning)),
             ("external_blocker", external_blocker),
         ):
             if val is not None:
@@ -589,6 +917,21 @@ class Store:
         t = self.get_task(task_id)
         assert t is not None
         return t
+
+    def set_workspace(
+        self,
+        task_id: str,
+        branch: str | None,
+        worktree_path: str,
+        base_commit: str | None,
+    ) -> None:
+        with self._lock:
+            updated = self._conn.execute(
+                "UPDATE tasks SET branch=?, worktree_path=?, base_commit=? WHERE id=?",
+                (branch, worktree_path, base_commit, task_id),
+            )
+            if updated.rowcount == 0:
+                raise KeyError(task_id)
 
     def reorder(self, task_id: str, new_order: int) -> None:
         """Change the order within the current column."""
@@ -644,6 +987,8 @@ class Store:
         icon: str = "",
         sort_order: int | None = None,
         path: str | None = None,
+        branch_template: str = "kanban/{task_id}-{slug}",
+        agent_rules: str = "",
     ) -> Project:
         ts = _now()
         with self._lock:
@@ -656,9 +1001,9 @@ class Store:
                     sort_order = (r["m"] + 1) if r else 0
                 self._conn.execute(
                     """INSERT INTO projects
-                       (id, name, color, icon, sort_order, archived, path, created_at)
-                       VALUES (?, ?, ?, ?, ?, 0, ?, ?)""",
-                    (project_id, name, color, icon or name[:1].upper(), sort_order, path, ts),
+                       (id, name, color, icon, sort_order, archived, path, branch_template, agent_rules, created_at)
+                       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)""",
+                    (project_id, name, color, icon or name[:1].upper(), sort_order, path, branch_template, agent_rules, ts),
                 )
                 self._conn.execute("COMMIT")
             except Exception:
@@ -677,13 +1022,15 @@ class Store:
         icon: str | None = None,
         sort_order: int | None = None,
         path: str | None = None,
+        branch_template: str | None = None,
+        agent_rules: str | None = None,
     ) -> Project:
         sets: list[str] = []
         params: list[Any] = []
         # path is forwarded as-is (None means "leave alone", "" means "clear").
         for col, val in (
             ("name", name), ("color", color), ("icon", icon),
-            ("sort_order", sort_order), ("path", path),
+            ("sort_order", sort_order), ("path", path), ("branch_template", branch_template), ("agent_rules", agent_rules),
         ):
             if val is not None:
                 sets.append(f"{col} = ?")
@@ -768,6 +1115,31 @@ class Store:
         assert p is not None
         return p
 
+    def delete_archived_project(self, project_id: str) -> None:
+        """Permanently remove an archived project and its board data.
+
+        Git branches and worktrees intentionally remain untouched: they may
+        contain work that must be reviewed or recovered outside the board.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT archived FROM projects WHERE id=?", (project_id,)
+            ).fetchone()
+            if not row:
+                raise KeyError(project_id)
+            if not row["archived"]:
+                raise ValueError("archive the project before deleting it")
+            try:
+                self._conn.execute("BEGIN")
+                # task-related tables use ON DELETE CASCADE; tasks themselves
+                # predate project foreign keys, so remove them explicitly.
+                self._conn.execute("DELETE FROM tasks WHERE project_id=?", (project_id,))
+                self._conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
     def _row_to_project(self, row: sqlite3.Row) -> Project:
         return Project(
             id=row["id"],
@@ -778,6 +1150,8 @@ class Store:
             archived=bool(row["archived"]),
             created_at=row["created_at"],
             path=row["path"] if "path" in row.keys() else None,
+            branch_template=row["branch_template"] if "branch_template" in row.keys() else "kanban/{task_id}-{slug}",
+            agent_rules=row["agent_rules"] if "agent_rules" in row.keys() else "",
         )
 
     # ------------------------------------------------------------------
@@ -828,11 +1202,15 @@ class Store:
             assignee=row["assignee"],
             description=row["description"],
             acceptance=row["acceptance"],
+            skip_planning=bool(row["skip_planning"]) if "skip_planning" in row.keys() else False,
             external_blocker=row["external_blocker"],
             created_at=row["created_at"],
             moved_at=row["moved_at"],
             column_order=row["column_order"],
             project_id=row["project_id"] if "project_id" in row.keys() else DEFAULT_PROJECT_ID,
+            branch=row["branch"] if "branch" in row.keys() else None,
+            worktree_path=row["worktree_path"] if "worktree_path" in row.keys() else None,
+            base_commit=row["base_commit"] if "base_commit" in row.keys() else None,
         )
         if eager_links:
             link_rows = self._conn.execute(
@@ -859,6 +1237,7 @@ class Store:
                     from_status=r["from_status"],
                     to_status=r["to_status"],
                     comment=r["comment"],
+                    skip_planning=bool(r["skip_planning"]) if "skip_planning" in r.keys() else False,
                 )
                 for r in h_rows
             ]

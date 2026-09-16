@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=Cinzel:wght@500;600;700&family=Marcellus&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=2026-05-09-en1" />
+  <link rel="stylesheet" href="/static/styles.css?v=2026-09-16-integrate" />
   <script>
     // Apply saved theme and profile before body parses — no flash of wrong styles.
     // Also accept ?theme=light|dark and ?profile=standard|cyberpunk|horizon
@@ -46,12 +46,12 @@
       <div class="proj-archive" id="proj-archive" hidden>
         <button class="proj-archive__head" id="btn-archive-toggle">
           <span class="proj-archive__chevron">▸</span>
-          <span>Archive</span>
+          <span data-i18n="archive">Archive</span>
           <span class="proj-archive__count" id="archive-count">0</span>
         </button>
         <div class="proj-archive__list" id="proj-archive-list" hidden></div>
       </div>
-      <button class="proj-add" id="btn-new-proj">+ New project</button>
+      <button class="proj-add" id="btn-new-proj" data-i18n="newProject">+ New project</button>
     </aside>
 
     <!-- ========== Workspace ========== -->
@@ -63,14 +63,14 @@
           <span class="topbar__count" id="stats">—</span>
         </div>
         <div class="topbar__search">
-          <input type="text" id="search" placeholder="Search (/) — title, id, description" autocomplete="off" />
+          <input type="text" id="search" data-i18n-placeholder="search" placeholder="Search (/) — title, id, description" autocomplete="off" />
           <button class="search__clear" id="btn-search-clear" hidden aria-label="Clear">×</button>
         </div>
         <div class="topbar__filters" id="filters">
-          <button class="filter-chip" data-filter="prio:high" title="HIGH only">HIGH</button>
-          <button class="filter-chip" data-filter="blocked" title="With blocker only">Blocker</button>
-          <button class="filter-chip" data-filter="assignee:agent" title="Agents only">Agents</button>
-          <button class="filter-chip" data-filter="unassigned" title="No assignee">Unassigned</button>
+          <button class="filter-chip" data-filter="prio:high" data-i18n="high" title="HIGH only">HIGH</button>
+          <button class="filter-chip" data-filter="blocked" data-i18n="blocker" title="With blocker only">Blocker</button>
+          <button class="filter-chip" data-filter="assignee:agent" data-i18n="agents" title="Agents only">Agents</button>
+          <button class="filter-chip" data-filter="unassigned" data-i18n="unassigned" title="No assignee">Unassigned</button>
         </div>
         <div class="topbar__actions">
           <button class="btn btn--icon claude-auth claude-auth--unknown" id="btn-claude-auth" title="Claude CLI status" aria-label="Claude auth">
@@ -79,9 +79,10 @@
           <button class="btn btn--icon" id="btn-profile" title="Switch theme profile (p)" aria-label="Profile">◇</button>
           <button class="btn btn--icon" id="btn-theme" title="Toggle theme (t)" aria-label="Theme">◐</button>
           <button class="btn btn--icon" id="btn-density" title="Card density (d)" aria-label="Density">≡</button>
-          <button class="btn btn--ghost" id="btn-snapshot" title="Snapshot board → snapshots/">Snapshot</button>
+          <button class="btn btn--ghost" id="btn-language" title="Switch language">RU</button>
+          <button class="btn btn--ghost" id="btn-snapshot" data-i18n="snapshot" title="Snapshot board → snapshots/">Snapshot</button>
           <button class="btn btn--ghost" id="btn-refresh" title="Refresh (r)" aria-label="Refresh">↻</button>
-          <button class="btn btn--primary" id="btn-new" title="New task (n)">+ Task</button>
+          <button class="btn btn--primary" id="btn-new" data-i18n="newTask" title="New task (n)">+ Task</button>
         </div>
       </header>
 
@@ -95,81 +96,58 @@
   <!-- ========== Task detail modal ========== -->
   <div class="modal" id="modal" hidden>
     <div class="modal__backdrop" data-close></div>
-    <div class="modal__panel">
-      <header class="modal__head">
-        <span class="task-id" id="m-id">T-???</span>
-        <span class="chip chip--status" id="m-status">…</span>
-        <button class="btn btn--icon" data-close aria-label="Close">×</button>
-      </header>
-      <div class="modal__body">
-        <div class="field">
-          <label>Title</label>
-          <input type="text" id="m-title" />
-        </div>
-        <div class="field-row">
-          <div class="field">
-            <label>Priority</label>
-            <select id="m-priority">
-              <option value="high">High</option>
-              <option value="normal">Normal</option>
-              <option value="low">Low</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Size</label>
-            <select id="m-size">
-              <option value="S">S — &lt;30 min</option>
-              <option value="M">M — &lt;2 h</option>
-              <option value="L">L — &gt;2 h</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Assignee</label>
-            <input type="text" id="m-assignee" readonly placeholder="—" />
-          </div>
-        </div>
-        <div class="field">
-          <label>Description</label>
-          <textarea id="m-description" rows="6"></textarea>
-        </div>
-        <div class="field">
-          <label>Acceptance criteria</label>
-          <textarea id="m-acceptance" rows="4"></textarea>
-        </div>
-        <div class="field">
-          <label>External blocker</label>
-          <input type="text" id="m-blocker" placeholder="e.g. DevOps: monitoring.viewer" />
-        </div>
-        <div class="field">
-          <label>Links</label>
-          <div class="links" id="m-links"></div>
-          <div class="link-add">
-            <select id="m-link-type">
-              <option value="memory">memory</option>
-              <option value="file">file</option>
-              <option value="pr">pr</option>
-              <option value="url">url</option>
-            </select>
-            <input type="text" id="m-link-value" placeholder="filename or url" />
-            <button class="btn btn--ghost" id="btn-add-link">+</button>
-          </div>
-        </div>
-        <div class="field">
-          <label>History</label>
+    <div class="modal__panel task-panel">
+      <div class="modal__body task-view" id="task-view">
+        <header class="task-view__head">
+          <div class="task-view__meta"><span class="task-id" id="m-id">T-???</span><span class="direct-badge" id="m-direct-badge" hidden><span aria-hidden="true">✓</span><span data-i18n="directTask">Сразу выполнить</span></span><select id="m-move-status" class="task-status-select"></select></div>
+          <button class="btn btn--ghost" id="btn-edit-task" type="button" data-i18n="edit">Edit</button>
+          <button class="btn btn--icon" data-close aria-label="Close">×</button>
+          <h1 id="m-title-view" title="Click to edit"></h1>
+          <div class="task-view__branch" id="m-branch-view"></div>
+        </header>
+        <section class="task-section">
+          <h2 data-i18n="description">Description</h2>
+          <div class="task-section__text" id="m-description-view"></div>
+        </section>
+        <section class="task-section" id="m-acceptance-section" hidden>
+          <h2 data-i18n="acceptance">Acceptance criteria</h2>
+          <div class="task-section__text" id="m-acceptance-view"></div>
+        </section>
+        <section class="task-section" id="m-dependencies-section" hidden>
+          <h2 data-i18n="taskBlockers">Task blockers</h2>
+          <div class="blocker-chips" id="m-blockers-view"></div>
+        </section>
+        <section class="task-discussion">
+          <h2 id="m-discussion-title" data-i18n="discussion">Discussion</h2>
           <div class="history" id="m-history"></div>
-        </div>
-        <div class="field">
-          <label>Add comment</label>
-          <div class="comment-add">
-            <input type="text" id="m-comment" placeholder="Comment text" />
-            <button class="btn btn--ghost" id="btn-add-comment">+</button>
+          <div class="comment-compose">
+            <div class="comment-compose__avatar">Я</div>
+            <div class="comment-compose__main">
+              <textarea id="m-comment" rows="2" data-i18n-placeholder="commentText" placeholder="Comment text"></textarea>
+              <div class="comment-compose__bar">
+                <label class="check-row check-row--compact"><input id="m-comment-direct" type="checkbox" /><span data-i18n="commentDirect">Start immediately</span></label>
+                <button class="btn btn--primary" id="btn-add-comment" data-i18n="send">Send</button>
+              </div>
+            </div>
           </div>
-        </div>
+        </section>
       </div>
-      <footer class="modal__foot">
-        <button class="btn btn--ghost" data-close>Cancel</button>
-        <button class="btn btn--primary" id="btn-save">Save</button>
-      </footer>
+    </div>
+  </div>
+
+  <!-- ========== Task editor (separate modal) ========== -->
+  <div class="modal" id="task-edit-modal" hidden>
+    <div class="modal__backdrop" data-close-edit></div>
+    <div class="modal__panel task-editor-panel">
+      <header class="modal__head"><span class="task-id" id="m-edit-id"></span><button class="btn btn--icon" data-close-edit aria-label="Close">×</button></header>
+      <div class="modal__body task-editor">
+        <div class="field"><label data-i18n="title">Title</label><input type="text" id="m-title" /></div>
+        <div class="field"><label data-i18n="description">Description</label><textarea id="m-description" rows="7"></textarea></div>
+        <div class="field"><label data-i18n="acceptance">Acceptance criteria</label><textarea id="m-acceptance" rows="4"></textarea></div>
+        <label class="check-row"><input id="m-skip-planning" type="checkbox" /><span data-i18n="skipPlanning">Start without plan review</span></label>
+        <div class="field"><label data-i18n="taskBlockers">Task blockers</label><div class="chips-input" id="m-blockers-input"><div class="blocker-chips" id="m-blocker-chips"></div><input id="m-blocker-query" type="text" autocomplete="off" /><div class="chips-menu" id="m-blocker-menu" hidden></div></div></div>
+      </div>
+      <footer class="modal__foot"><button class="btn btn--ghost" id="btn-cancel-edit" type="button" data-i18n="cancel">Cancel</button><button class="btn btn--primary" id="btn-save" data-i18n="save">Save</button></footer>
     </div>
   </div>
 
@@ -178,53 +156,39 @@
     <div class="modal__backdrop" data-close-new></div>
     <div class="modal__panel">
       <header class="modal__head">
-        <span class="task-id">New task</span>
+        <span class="task-id" data-i18n="newTask">New task</span>
         <span class="chip chip--status" id="n-proj-chip">FinOps</span>
         <button class="btn btn--icon" data-close-new aria-label="Close">×</button>
       </header>
       <div class="modal__body">
         <div class="field">
-          <label>Title</label>
+          <label data-i18n="title">Title</label>
           <input type="text" id="n-title" />
         </div>
-        <div class="field-row">
-          <div class="field">
-            <label>Column</label>
-            <select id="n-status">
-              <option value="backlog">Backlog</option>
-              <option value="approved">Approved</option>
-              <option value="blocked">Blocked</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Priority</label>
-            <select id="n-priority">
-              <option value="normal">Normal</option>
-              <option value="high">High</option>
-              <option value="low">Low</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Size</label>
-            <select id="n-size">
-              <option value="M">M</option>
-              <option value="S">S</option>
-              <option value="L">L</option>
-            </select>
-          </div>
+        <div class="field">
+          <label data-i18n="column">Column</label>
+          <select id="n-status">
+            <option value="draft" data-status-option>Draft</option>
+            <option value="backlog" data-status-option>Backlog</option>
+          </select>
         </div>
         <div class="field">
-          <label>Description</label>
+          <label data-i18n="description">Description</label>
           <textarea id="n-description" rows="5"></textarea>
         </div>
         <div class="field">
-          <label>Acceptance criteria</label>
+          <label data-i18n="acceptance">Acceptance criteria</label>
           <textarea id="n-acceptance" rows="3"></textarea>
+        </div>
+        <label class="check-row"><input id="n-skip-planning" type="checkbox" /><span data-i18n="skipPlanning">Start without plan review</span></label>
+        <div class="field">
+          <label data-i18n="taskBlockers">Task blockers</label>
+          <div class="chips-input" id="n-blockers-input"><div class="blocker-chips" id="n-blocker-chips"></div><input id="n-blocker-query" type="text" autocomplete="off" /><div class="chips-menu" id="n-blocker-menu" hidden></div></div>
         </div>
       </div>
       <footer class="modal__foot">
-        <button class="btn btn--ghost" data-close-new>Cancel</button>
-        <button class="btn btn--primary" id="btn-create">Create</button>
+        <button class="btn btn--ghost" data-close-new data-i18n="cancel">Cancel</button>
+        <button class="btn btn--primary" id="btn-create" data-i18n="create">Create</button>
       </footer>
     </div>
   </div>
@@ -234,29 +198,39 @@
     <div class="modal__backdrop" data-close-proj></div>
     <div class="modal__panel modal__panel--narrow">
       <header class="modal__head">
-        <span class="task-id" id="proj-modal-title">New project</span>
+        <span class="task-id" id="proj-modal-title" data-i18n="newProjectTitle">New project</span>
         <button class="btn btn--icon" data-close-proj aria-label="Close">×</button>
       </header>
       <div class="modal__body">
         <div class="field">
-          <label>Name</label>
+          <label data-i18n="name">Name</label>
           <input type="text" id="p-name" placeholder="DevOps" />
         </div>
         <div class="field">
-          <label>ID (slug)</label>
+          <label data-i18n="projectId">ID (slug)</label>
           <input type="text" id="p-id" placeholder="devops" pattern="^[a-z][a-z0-9-]{1,31}$" />
-          <span class="field__hint">Lowercase latin, digits, hyphen. 2 to 32 characters.</span>
+          <span class="field__hint" data-i18n="idHint">Lowercase latin, digits, hyphen. 2 to 32 characters.</span>
         </div>
         <div class="field">
-          <label>Project directory</label>
+          <label data-i18n="projectDirectory">Project directory</label>
           <div class="path-row">
-            <input type="text" id="p-path" placeholder="not selected" autocomplete="off" />
-            <button class="btn btn--ghost" type="button" data-action="pick-folder" id="btn-pick-folder" title="Pick in Finder">Choose…</button>
+            <input type="text" id="p-path" data-i18n-placeholder="pathHint" placeholder="not selected" autocomplete="off" />
+            <button class="btn btn--ghost" type="button" data-action="pick-folder" id="btn-pick-folder" title="Pick in Finder" data-i18n="choose">Choose…</button>
           </div>
-          <span class="field__hint">Optional. Path to the Claude Code project on disk.</span>
+          <span class="field__hint" data-i18n="pathHint">Optional. Path to the agent project on disk.</span>
         </div>
         <div class="field">
-          <label>Color</label>
+          <label data-i18n="branchTemplate">Branch template</label>
+          <input type="text" id="p-branch-template" value="kanban/{task_id}-{slug}" />
+          <span class="field__hint" data-i18n="branchHint">Available variables: {task_id}, {slug}. Example: kanban/t-042-add-cart.</span>
+        </div>
+        <div class="field">
+          <label data-i18n="agentRules">Agent rules for this project</label>
+          <textarea id="p-agent-rules" rows="5" data-i18n-placeholder="agentRulesExample" placeholder="Example: use Python 3.13, run pytest, do not change public API without asking."></textarea>
+          <span class="field__hint" data-i18n="agentRulesHint">These instructions are returned with the project metadata to a connected agent.</span>
+        </div>
+        <div class="field">
+          <label data-i18n="color">Color</label>
           <div class="color-palette" id="p-palette">
             <button class="swatch is-active" data-color="#F10D30" style="background:#F10D30" aria-label="red"></button>
             <button class="swatch" data-color="#16315A" style="background:#16315A" aria-label="navy"></button>
@@ -270,61 +244,46 @@
         </div>
         <!-- ==== Source wizard ==== -->
         <div class="field source-wizard" id="source-wizard">
-          <label>Task source</label>
+          <label data-i18n="taskSource">Task source</label>
           <div class="source-tabs">
-            <button class="source-tab is-active" data-source="new" type="button">New project</button>
-            <button class="source-tab" data-source="local" type="button">Existing plans</button>
-            <button class="source-tab" data-source="git" type="button">Git repo</button>
+            <button class="source-tab is-active" data-source="new" type="button" data-i18n="sourceNew">New project</button>
+            <button class="source-tab" data-source="local" type="button" data-i18n="sourceLocal">Existing plans</button>
+            <button class="source-tab" data-source="git" type="button" data-i18n="sourceGit">Git repo</button>
           </div>
 
           <div class="source-pane" data-pane="new">
-            <p class="source-hint">
-              Kanban will create <code>PLAN.md</code> in the directory and add an
-              instruction block to <code>CLAUDE.md</code>: Claude writes new tasks
-              to <code>PLAN.md</code>, and Kanban picks them up.
-            </p>
+            <p class="source-hint" data-i18n="sourceNewHelp">Kanban will create PLAN.md in the directory and add instructions to CLAUDE.md. The agent writes tasks to PLAN.md, and Kanban imports them.</p>
           </div>
 
           <div class="source-pane" data-pane="local" hidden>
             <div class="src-candidates" id="src-candidates">
-              <div class="src-candidates__empty">First specify the project directory (field above).</div>
+              <div class="src-candidates__empty" data-i18n="sourceNoPath">First specify the project directory (field above).</div>
             </div>
             <div class="src-candidates__actions">
               <span class="src-candidates__counter" id="src-candidates-counter">Selected: 0</span>
               <button class="btn btn--ghost" type="button" data-action="refresh-candidates" id="btn-refresh-candidates" title="Reload">↻</button>
-              <button class="btn btn--ghost" type="button" data-action="pick-folder" id="btn-pick-other-folder">Choose another folder…</button>
+              <button class="btn btn--ghost" type="button" data-action="pick-folder" id="btn-pick-other-folder" data-i18n="chooseOther">Choose another folder…</button>
             </div>
-            <p class="source-hint">
-              Tick the files to import tasks from. Files like PLAN/BACKLOG/TASKS
-              are checked automatically. The parser reads
-              <code>## Backlog</code>, <code>## In progress</code>,
-              <code>## Done</code> headings and the like — every
-              <code>- [ ] ...</code> line becomes a card. After import we update
-              <code>CLAUDE.md</code> so Claude writes new tasks to the first
-              selected file.
-            </p>
+            <p class="source-hint" data-i18n="sourceLocalHelp">Choose Markdown plans with headings such as Backlog, In progress, or Done. The first chosen file is also added to CLAUDE.md so the agent can add tasks there.</p>
           </div>
 
           <div class="source-pane" data-pane="git" hidden>
             <input type="text" id="src-git-url" placeholder="https://github.com/user/repo" autocomplete="off" />
             <input type="password" id="src-git-token" placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx" autocomplete="off" />
-            <p class="source-hint">
-              The URL is stored in the project DB; the token goes to
-              <code>kanban_data/.env-secrets</code> with mode 600 as
-              <code>KANBAN_GIT_TOKEN_&lt;ID&gt;</code>.
-              Issue import will arrive in the next release.
-            </p>
+            <p class="source-hint" data-i18n="gitTokenHint">The token is stored locally in kanban_data/.env-secrets with mode 600 as KANBAN_GIT_TOKEN_&lt;ID&gt;.</p>
           </div>
 
           <div class="source-current" id="source-current" hidden>
-            <strong>Current source:</strong>
+            <strong data-i18n="currentSource">Current source:</strong>
             <span id="source-current-text">—</span>
           </div>
         </div>
       </div>
       <footer class="modal__foot">
-        <button class="btn btn--ghost" data-close-proj>Cancel</button>
-        <button class="btn btn--primary" id="btn-create-proj">Create</button>
+        <button class="btn btn--ghost" id="btn-archive-proj" hidden></button>
+        <button class="btn btn--ghost" id="btn-delete-proj" hidden></button>
+        <button class="btn btn--ghost" data-close-proj data-i18n="cancel">Cancel</button>
+        <button class="btn btn--primary" id="btn-create-proj" data-i18n="create">Create</button>
       </footer>
     </div>
   </div>
@@ -332,6 +291,6 @@
   <div class="toast" id="toast" hidden></div>
 
   <script src="/static/vendor/Sortable.min.js"></script>
-  <script src="/static/app.js?v=2026-05-09-en1"></script>
+  <script src="/static/app.js?v=2026-09-16-integrate"></script>
 </body>
 </html>

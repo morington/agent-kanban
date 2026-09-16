@@ -42,24 +42,30 @@ log = logging.getLogger("kanban.plan_md")
 # Heading-to-status mapping (case-insensitive, punctuation stripped).
 HEADING_TO_STATUS: dict[str, str] = {
     "backlog": "backlog", "бэклог": "backlog",
-    "approved": "approved", "согласовано": "approved",
-    "analyst": "analyst", "analytics": "analyst", "аналитика": "analyst",
+    "draft": "draft", "черновик": "draft",
+    "plan requested": "plan_requested", "запрос плана": "plan_requested",
+    "planning": "planning", "планирование": "planning",
+    "plan review": "plan_review", "согласование плана": "plan_review",
+    "plan approved": "plan_review", "план согласован": "plan_review",
     "in progress": "in_progress", "wip": "in_progress",
     "in_progress": "in_progress", "в работе": "in_progress",
     "testing": "testing", "qa": "testing", "тестирование": "testing",
-    "uat": "uat", "acceptance": "uat", "приёмка": "uat", "приемка": "uat",
+    "acceptance": "acceptance", "приёмка": "acceptance", "приемка": "acceptance",
+    "integrate": "acceptance", "слияние": "acceptance",
     "done": "done", "closed": "done", "закрыто": "done",
     "blocked": "blocked", "заблокировано": "blocked",
     "cancelled": "cancelled", "canceled": "cancelled", "отменено": "cancelled",
 }
 
 STATUS_LABELS_RU = {
+    "draft":       "Draft",
     "backlog":     "Backlog",
-    "approved":    "Approved",
-    "analyst":     "Analyst",
+    "plan_requested": "Plan requested",
+    "planning":    "Planning",
+    "plan_review": "Plan approved",
     "in_progress": "In progress",
     "testing":     "Testing",
-    "uat":         "UAT",
+    "acceptance":  "Integrate",
     "done":        "Done",
     "blocked":     "Blocked",
     "cancelled":   "Cancelled",
@@ -142,8 +148,9 @@ def render_plan_template(project_name: str, project_id: str) -> str:
         f"http://localhost:7777/p/{project_id}\n"
         f"> Every `- [ ] ...` line under a column heading = a card in "
         f"that column.\n"
-        f"> Allowed column headings: Backlog, Approved, Analyst, "
-        f"In progress, Testing, UAT, Done, Blocked, Cancelled (Russian also OK).\n\n"
+        f"> Allowed column headings: Backlog, Plan requested, Planning, "
+        f"Plan approved, In progress, Testing, Integrate, Done, Blocked, "
+        f"Cancelled (Russian also OK).\n\n"
         f"## Backlog\n\n"
         f"- [ ] (new tasks land here)\n\n"
         f"## In progress\n\n"
@@ -155,41 +162,17 @@ CLAUDE_MD_BLOCK_MARKER = "<!-- KANBAN-BOARD-BLOCK -->"
 
 CLAUDE_MD_TEMPLATE = """\
 {marker}
-## Kanban board ({project_name})
+## Kanban ({project_name})
 
-Kanban board — http://localhost:7777/p/{project_id}. MCP server is wired
-in via `.mcp.json` at the repo root (14 tools `mcp__<alias>__kanban_*`).
+http://localhost:7777/p/{project_id}
 
-### Agent workflow rules (strict)
+On “check the board”: `kanban_ready`. Handle cards **in list order** (Integrate, Testing, Plan approved, Planning). Use `next` and always follow `after`:
+- `plan` — pull, `kanban_comment` a short plan or reply to feedback, leave in Planning. No code.
+- `implement` — pull, `kanban_prepare_workspace`, work **only in `worktree_path`**, `kanban_commit`, **`kanban_comment` what you did**, move to testing. Independent cards can run in parallel (separate worktrees).
+- `integrate` — `kanban_integrate` (merge into main and move to Done). Independent tasks branch from main; a child blocked by another card branches from that parent.
+Call `kanban_ready` again. Stop when empty. Blockers lift at Testing. Do not `kanban_move` to Done yourself.
 
-When you take a task from the kanban:
-
-1. **Before editing any files** — call `kanban_move(task_id,
-   "in_progress")`. The human needs to see that work has actually
-   started, not just been announced in chat.
-2. **As you work** — `kanban_comment(task_id, ...)` with the plan,
-   blockers, decisions. These land in `task_history` and show up in
-   the UI.
-3. **When implementation is complete** — `kanban_move(task_id,
-   "testing", comment="ready for review")`. **Never move a task to
-   `done` yourself.** `done` is reserved for the human after review
-   through the UI.
-4. If you get stuck — `kanban_move(task_id, "blocked",
-   comment="what's blocking")`.
-
-Skipping step 1 (silently editing files) or jumping to `done` makes
-the board lie about the real state — the human can't tell what you
-actually claimed vs. just described in chat.
-
-### Plan-file sync
-
-New tasks for this project go into [PLAN.md]({plan_path}) as
-`- [ ] {{title}}` lines under `## Backlog`. Move them under
-`## In progress` / `## Done` / `## Blocked` as state changes (file →
-kanban for now; bidirectional sync is planned).
-
-Supported PLAN.md headings: Backlog, Approved, Analyst, In progress,
-Testing, UAT, Done, Blocked, Cancelled.
+New tasks: [PLAN.md]({plan_path}) under `## Backlog`.
 {marker_end}
 """
 

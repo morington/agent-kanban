@@ -39,26 +39,25 @@ The kanban server is the same in all three cases — the difference is only how 
 `KANBAN_PROJECT_ID` — default project for `kanban_create` calls without an argument.
 `KANBAN_ACTOR` — author name written into `task_history` for every move/comment the agent makes. Set this to something other than `user` (e.g. `claude`) so the history clearly distinguishes agent actions from human drag-drops in the UI.
 
-Restart Claude Code (or run `claude mcp list` to confirm `✓ Connected`). 14 tools become available:
+Restart Claude Code (or run `claude mcp list` to confirm `✓ Connected`). Tools:
 
 | Tool | Purpose |
 |---|---|
-| `kanban_columns` | list of columns + ownership semantics |
-| `kanban_list` | tasks with optional status / assignee filters |
-| `kanban_get` | full card with history + links + blockers |
-| `kanban_pull` | atomically claim an `approved` task → `analyst`, assignee = current agent |
-| `kanban_move` | move card to a new column |
-| `kanban_comment` | append comment to history |
-| `kanban_create` | new card |
-| `kanban_link` | attach memory/file/pr/url link |
-| `kanban_blockers` | set/replace inter-task blockers |
-| `kanban_update` | edit title/priority/size/description/blocker |
+| `kanban_ready` | Cards to handle now (`next`: plan / implement / integrate) |
+| `kanban_get` | Full card with history + links + blockers |
+| `kanban_pull` | Claim a ready card |
+| `kanban_prepare_workspace` | Create/switch the task branch in the project directory |
+| `kanban_commit` | Commit on the task branch |
+| `kanban_integrate` | Merge that branch into `main` (from Integrate) |
+| `kanban_move` / `kanban_comment` | Status and discussion |
+| `kanban_create` / `kanban_update` / `kanban_blockers` / `kanban_link` | Card edits |
+| `kanban_board` / `kanban_list` / `kanban_search` / `kanban_projects` / `kanban_my_active` / `kanban_columns` | Browse |
+
+Independent cards branch from `main`. If B lists A as a blocker, B branches from A's task branch. After Testing you move the card to **Integrate**; the agent calls `kanban_integrate`.
 
 **Example prompt for the agent:**
 
-> "List my pending tasks for project `myproj`, then claim the highest-priority approved one."
-
-The agent will call `kanban_list(status="approved", project_id="myproj")` then `kanban_pull(task_id="T-007")`.
+> When I say “check the board”, call `kanban_ready` for this project. Handle cards in list order (Integrate, Testing, Plan approved, Planning). Read `feedback` if present. Always follow `after`. `plan`: pull, `kanban_comment` the plan or reply, leave in Planning. `implement`: pull, `kanban_prepare_workspace`, do the card, `kanban_commit`, `kanban_comment` what you did, move to Testing. `integrate`: `kanban_integrate` (merge and Done). Repeat until empty.
 
 ---
 

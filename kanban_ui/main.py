@@ -9,6 +9,7 @@ Endpoints (v2):
     POST   /api/projects              — create a project
     PATCH  /api/projects/{id}         — update (name/color/icon/sort_order)
     POST   /api/projects/{id}/archive — archive (toggle)
+    DELETE /api/projects/{id}         — permanently delete an archived project
     GET    /api/tasks/{task_id}       — full card with history
     POST   /api/tasks                 — create (project_id in payload)
     PATCH  /api/tasks/{task_id}       — update fields
@@ -26,6 +27,7 @@ import os
 import re
 import shutil
 import sys
+import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -36,6 +38,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from kanban_store import Store, STATUSES, status_meta
+from kanban_store.workspace import (
+    WorkspaceError,
+    commit_task,
+    integrate_task,
+    prepare_task_workspace,
+)
 from kanban_store.store import DEFAULT_PROJECT_ID
 from kanban_ui.automation import (
     InboxWatcher,
@@ -145,7 +153,8 @@ class TaskCreate(BaseModel):
     title: str
     description: str = ""
     acceptance: str = ""
-    status: str = "backlog"
+    skip_planning: bool = False
+    status: str = "draft"
     priority: str = "normal"
     size: str = "M"
     external_blocker: str | None = None
@@ -157,6 +166,7 @@ class TaskUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
     acceptance: str | None = None
+    skip_planning: bool | None = None
     priority: str | None = None
     size: str | None = None
     external_blocker: str | None = None
@@ -169,6 +179,15 @@ class MoveRequest(BaseModel):
 
 
 class CommentRequest(BaseModel):
+    text: str
+    skip_planning: bool = False
+
+
+class CommitRequest(BaseModel):
+    message: str
+
+
+class CommentUpdateRequest(BaseModel):
     text: str
 
 
@@ -188,6 +207,8 @@ class ProjectCreate(BaseModel):
     icon: str = ""
     sort_order: int | None = None
     path: str | None = None
+    branch_template: str = "kanban/{task_id}-{slug}"
+    agent_rules: str = ""
 
 
 class ProjectUpdate(BaseModel):
@@ -196,10 +217,16 @@ class ProjectUpdate(BaseModel):
     icon: str | None = None
     sort_order: int | None = None
     path: str | None = None
+    branch_template: str | None = None
+    agent_rules: str | None = None
 
 
 class ProjectArchiveRequest(BaseModel):
     archived: bool = True
+
+
+class ProjectDeleteRequest(BaseModel):
+    confirm: bool = False
 
 
 class SourcePlanLocalRequest(BaseModel):
@@ -252,6 +279,7 @@ def get_board(project: str = Query(DEFAULT_PROJECT_ID, description="project_id")
                 "priority": t.priority,
                 "size": t.size,
                 "assignee": t.assignee,
+                "skip_planning": t.skip_planning,
                 "external_blocker": t.external_blocker,
                 "blockers": t.blockers,
                 "moved_at": t.moved_at,
@@ -306,6 +334,8 @@ def create_project(req: ProjectCreate) -> dict[str, Any]:
         icon=req.icon,
         sort_order=req.sort_order,
         path=_normalize_path(req.path),
+        branch_template=req.branch_template,
+        agent_rules=req.agent_rules,
     )
     return p.to_public()
 
@@ -321,6 +351,8 @@ def update_project(project_id: str, req: ProjectUpdate) -> dict[str, Any]:
             sort_order=req.sort_order,
             # an empty string clears path in the database
             path=_normalize_path(req.path) if req.path != "" else "",
+            branch_template=req.branch_template,
+            agent_rules=req.agent_rules,
         )
     except KeyError:
         raise HTTPException(404, f"project {project_id} not found")
@@ -559,13 +591,27 @@ def setup_source_git(project_id: str, req: SourceGitRequest) -> dict[str, Any]:
 
 @app.post("/api/projects/{project_id}/archive")
 def archive_project(project_id: str, req: ProjectArchiveRequest) -> dict[str, Any]:
-    if project_id == DEFAULT_PROJECT_ID and req.archived:
-        raise HTTPException(400, f"cannot archive default project '{DEFAULT_PROJECT_ID}'")
     try:
         p = _store.archive_project(project_id, archived=req.archived)
     except KeyError:
         raise HTTPException(404, f"project {project_id} not found")
     return p.to_public()
+
+
+@app.delete("/api/projects/{project_id}")
+def delete_project(project_id: str, req: ProjectDeleteRequest) -> dict[str, Any]:
+    if not req.confirm:
+        raise HTTPException(400, "set confirm=true to permanently delete a project")
+    try:
+        _store.delete_archived_project(project_id)
+    except KeyError:
+        raise HTTPException(404, f"project {project_id} not found")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {
+        "ok": True,
+        "note": "Board data was deleted. Git branches and worktrees were not removed.",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +644,7 @@ async def create_task(req: TaskCreate) -> dict[str, Any]:
         title=req.title,
         description=req.description,
         acceptance=req.acceptance,
+        skip_planning=req.skip_planning,
         status=req.status,
         priority=req.priority,
         size=req.size,
@@ -622,6 +669,7 @@ async def update_task(task_id: str, req: TaskUpdate) -> dict[str, Any]:
             title=req.title,
             description=req.description,
             acceptance=req.acceptance,
+            skip_planning=req.skip_planning,
             priority=req.priority,
             size=req.size,
             external_blocker=req.external_blocker,
@@ -632,7 +680,7 @@ async def update_task(task_id: str, req: TaskUpdate) -> dict[str, Any]:
         f for f, v in (
             ("title", req.title), ("description", req.description),
             ("acceptance", req.acceptance), ("priority", req.priority),
-            ("size", req.size), ("external_blocker", req.external_blocker),
+            ("size", req.size), ("skip_planning", req.skip_planning), ("external_blocker", req.external_blocker),
         ) if v is not None
     ]
     await emit_event("task_updated", {
@@ -675,7 +723,9 @@ async def move_task(task_id: str, req: MoveRequest) -> dict[str, Any]:
 @app.post("/api/tasks/{task_id}/comment", status_code=201)
 async def add_comment(task_id: str, req: CommentRequest) -> dict[str, Any]:
     try:
-        _store.add_comment(task_id, req.text, actor=_actor())
+        _store.add_comment(
+            task_id, req.text, actor=_actor(), skip_planning=req.skip_planning
+        )
     except KeyError:
         raise HTTPException(404, f"task {task_id} not found")
     t = _store.get_task(task_id)
@@ -685,6 +735,27 @@ async def add_comment(task_id: str, req: CommentRequest) -> dict[str, Any]:
             "project": _project_payload(t.project_id),
             "comment": req.text,
         })
+    return {"ok": True}
+
+
+@app.patch("/api/tasks/{task_id}/comments/{history_id}")
+def update_comment(task_id: str, history_id: int, req: CommentUpdateRequest) -> dict[str, Any]:
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "comment text is required")
+    try:
+        _store.update_comment(task_id, history_id, text)
+    except KeyError:
+        raise HTTPException(404, "comment not found")
+    return {"ok": True}
+
+
+@app.delete("/api/tasks/{task_id}/comments/{history_id}")
+def delete_comment(task_id: str, history_id: int) -> dict[str, Any]:
+    try:
+        _store.delete_comment(task_id, history_id)
+    except KeyError:
+        raise HTTPException(404, "comment not found")
     return {"ok": True}
 
 
@@ -698,8 +769,46 @@ def add_link(task_id: str, req: LinkRequest) -> dict[str, Any]:
 
 @app.post("/api/tasks/{task_id}/blockers")
 def set_blockers(task_id: str, req: BlockersRequest) -> dict[str, Any]:
-    _store.set_blockers(task_id, req.blocker_ids)
+    try:
+        _store.set_blockers(task_id, req.blocker_ids)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(400, str(exc))
     return {"ok": True, "blockers": req.blocker_ids}
+
+
+@app.post("/api/tasks/{task_id}/workspace", status_code=201)
+def prepare_workspace(task_id: str) -> dict[str, Any]:
+    """Bind the task to the project's configured directory."""
+    try:
+        result = prepare_task_workspace(_store, task_id, actor=_actor())
+    except KeyError:
+        raise HTTPException(404, f"task {task_id} not found")
+    except WorkspaceError as extra:
+        raise HTTPException(409, str(extra))
+    return {"ok": True, **result}
+
+
+@app.post("/api/tasks/{task_id}/commit", status_code=201)
+def commit_workspace(task_id: str, req: CommitRequest) -> dict[str, Any]:
+    try:
+        result = commit_task(_store, task_id, req.message, actor=_actor())
+    except KeyError:
+        raise HTTPException(404, f"task {task_id} not found")
+    except WorkspaceError as extra:
+        raise HTTPException(409, str(extra))
+    return {"ok": True, **result}
+
+
+@app.post("/api/tasks/{task_id}/integrate", status_code=201)
+def integrate_workspace(task_id: str) -> dict[str, Any]:
+    try:
+        result = integrate_task(_store, task_id, actor=_actor())
+    except KeyError:
+        raise HTTPException(404, f"task {task_id} not found")
+    except WorkspaceError as extra:
+        raise HTTPException(409, str(extra))
+    return {"ok": True, **result}
+
 
 
 # ---------------------------------------------------------------------------
@@ -960,8 +1069,8 @@ _mcp_http = FastApiMCP(
     app,
     name="agent-kanban",
     description=(
-        "Local-first kanban for AI-agent workflows. Drag a task to Approved "
-        "and your AI agent drives it through analyst → in_progress → testing."
+        "Local-first kanban for AI-agent workflows. Move a task to Plan requested "
+        "and your AI agent drives it through planning → plan review → implementation."
     ),
 )
 _mcp_http.mount()
